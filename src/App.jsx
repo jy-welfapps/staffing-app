@@ -1,15 +1,19 @@
 // ============================================================
-//  児童・職員スケジュール管理 v7
+//  児童・職員スケジュール管理 v8.0.7
 //  縦軸 = 時間(8:00〜19:00)、横軸 = 人員
 //  職員: 在所(下地)+送迎(斜線オーバーレイ, ルート番号)+休憩(ドット)
 //  児童: 在所バー+お迎えピン📌、学校グループ別列
 //  ルートオーバーレイ: 同一ルート番号の職員列を横断する帯
 // ============================================================
-import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback, createContext, useContext } from "react";
 
 // ─── 定数 ────────────────────────────────────────────────────
-let H_START = 7, H_END = 20, H_TOTAL = H_END - H_START;
-let CH = 52;          // 1時間の高さ px（動的計算）
+const H_START_DEF = 7, H_END_DEF = 20;
+const CH_DEF = 52;
+const GC = createContext({hStart:H_START_DEF, hEnd:H_END_DEF, hTotal:H_END_DEF-H_START_DEF, ch:CH_DEF, totalH:(H_END_DEF-H_START_DEF)*CH_DEF});
+const useG = () => useContext(GC);
+let H_START = H_START_DEF, H_END = H_END_DEF, H_TOTAL = H_END - H_START;
+let CH = CH_DEF;
 const CW_STAFF = 88;  // 職員列幅（通常）
 const CW_CHILD = 72;  // 児童列幅（通常）
 const CW_STAFF_SM = 44; // 職員列幅（コンパクト）
@@ -20,17 +24,31 @@ const SNAP = 0.25;
 const MIN_DUR = 0.25;
 let TOTAL_H = H_TOTAL * CH; // グリッド全高
 
+const BS=(bg,c)=>({background:bg,color:c,border:"none",borderRadius:6,padding:"5px 11px",fontSize:11,fontWeight:700,cursor:"pointer"});
 const DAYS_JP = ["日","月","火","水","木","金","土"];
 const DAYS_EN = ["sun","mon","tue","wed","thu","fri","sat"];
 const PERF_WARN_DAYS = 90;
 
-const STAFF_TYPES = {
+let STAFF_TYPES = {
   fulltime: { label:"常勤",    color:"#3b82f6" },
   part:     { label:"パート",  color:"#10b981" },
   timee:    { label:"タイミー",color:"#f59e0b" },
   help:     { label:"ヘルプ",  color:"#a855f7" },
 };
-const SCHOOL_GROUPS = {
+const DEFAULT_STAFF_TYPES = {
+  fulltime: { label:"常勤",    color:"#3b82f6" },
+  part:     { label:"パート",  color:"#10b981" },
+  timee:    { label:"タイミー",color:"#f59e0b" },
+  help:     { label:"ヘルプ",  color:"#a855f7" },
+};
+let SCHOOL_GROUPS = {
+  nursery:    { label:"保育園・幼稚園", color:"#f97316" },
+  elementary: { label:"小学校",        color:"#06b6d4" },
+  junior:     { label:"中学校",        color:"#ec4899" },
+  high:       { label:"高校",          color:"#8b5cf6" },
+  other:      { label:"その他",        color:"#64748b" },
+};
+const DEFAULT_SCHOOL_GROUPS = {
   nursery:    { label:"保育園・幼稚園", color:"#f97316" },
   elementary: { label:"小学校",        color:"#06b6d4" },
   junior:     { label:"中学校",        color:"#ec4899" },
@@ -51,65 +69,49 @@ const uid   = () => Math.random().toString(36).slice(2,9);
 const deepc = v => JSON.parse(JSON.stringify(v));
 const mkSeg = (s,e,t,n=null) => ({id:uid(),start:s,end:e,type:t,num:n});
 
-// ─── ストレージ（インメモリ、アーティファクト環境対応）────────
-const _store = {};
-const SK = "childcare_v7";
-const loadS = () => { try{ return _store[SK] ? JSON.parse(_store[SK]) : {} }catch{return{}}};
-const saveS = d => { try{ _store[SK] = JSON.stringify(d) }catch{}};
+// ─── ストレージ ─────────────────────────────────────────────
+// window.storage(アーティファクト永続) → localStorage → インメモリ の順でフォールバック
+const SK = "childcare_v8";
+let _cache = null;
+
+const _hasWS  = () => typeof window !== "undefined" && window.storage && typeof window.storage.get === "function";
+const _hasLS  = () => { try{ localStorage.setItem("__t","1"); localStorage.removeItem("__t"); return true; }catch{ return false; } };
+
+const loadS = () => _cache || {};
+
+const saveS = d => {
+  _cache = d;
+  const json = JSON.stringify(d);
+  if(_hasWS())  { window.storage.set(SK, json).catch(()=>{}); return; }
+  if(_hasLS())  { try{ localStorage.setItem(SK, json); }catch{} return; }
+};
+
+const initS = async () => {
+  // 1. window.storage を試みる
+  if(_hasWS()) {
+    try {
+      const r = await window.storage.get(SK);
+      if(r && r.value) { _cache = JSON.parse(r.value); return; }
+    } catch{}
+  }
+  // 2. localStorage を試みる
+  if(_hasLS()) {
+    try {
+      const v = localStorage.getItem(SK);
+      if(v) { _cache = JSON.parse(v); return; }
+    } catch{}
+  }
+  // 3. フォールバック：空データ
+  _cache = {};
+};
 
 // ─── 初期データ ──────────────────────────────────────────────
-const INIT_STAFF = [
-  {id:"st1", name:"山田 花子", stype:"fulltime",  segments:[mkSeg(9,18,"work"), mkSeg(13,14,"transfer",1), mkSeg(11.5,12.5,"break",1)]},
-  {id:"st2", name:"鈴木 一郎", stype:"fulltime",  segments:[mkSeg(9,18,"work"), mkSeg(14,15,"transfer",1), mkSeg(12.5,13.5,"break",1)]},
-  {id:"st3", name:"佐藤 美咲", stype:"fulltime",  segments:[mkSeg(9.5,18.5,"work"), mkSeg(13,14,"transfer",2), mkSeg(11.5,12.5,"break",2)]},
-  {id:"st4", name:"田中 健太", stype:"part",      segments:[mkSeg(9,18,"work"), mkSeg(13.5,14.5,"transfer",2), mkSeg(12.5,13.5,"break",2)]},
-  {id:"st5", name:"小林 直樹", stype:"part",      segments:[mkSeg(9.5,18.5,"work"), mkSeg(14,15,"transfer",3), mkSeg(11.5,12.5,"break",1)]},
-  {id:"st6", name:"高橋 由美", stype:"part",      segments:[mkSeg(9,18,"work"), mkSeg(13,14,"transfer",3), mkSeg(12.5,13.5,"break",2)]},
-  {id:"st7", name:"伊藤 春香", stype:"timee",     segments:[mkSeg(9,18,"work"), mkSeg(13.5,14.5,"transfer",1)]},
-  {id:"st8", name:"渡辺 大輔", stype:"timee",     segments:[mkSeg(9.5,18.5,"work"), mkSeg(13,14,"transfer",2)]},
-  {id:"st9", name:"中村 麻衣", stype:"help",      segments:[mkSeg(9,18,"work")]},
-];
-const INIT_CHILDREN = [
-  {id:"ch1",  name:"赤坂 蓮",   school:"elementary", pickupTime:14,   segments:[mkSeg(14,17,"work")]},
-  {id:"ch2",  name:"青木 花",   school:"elementary", pickupTime:14,   segments:[mkSeg(14,17,"work")]},
-  {id:"ch3",  name:"石川 空",   school:"elementary", pickupTime:14.5, segments:[mkSeg(14.5,17,"work")]},
-  {id:"ch4",  name:"岡田 樹",   school:"elementary", pickupTime:13,   segments:[mkSeg(13,17,"work")]},
-  {id:"ch5",  name:"加藤 朱",   school:"elementary", pickupTime:13,   segments:[mkSeg(13,17,"work")]},
-  {id:"ch6",  name:"木村 碧",   school:"elementary", pickupTime:14,   segments:[mkSeg(14,17,"work")]},
-  {id:"ch7",  name:"伊藤 葵",   school:"junior",     pickupTime:15,   segments:[mkSeg(15,17,"work")]},
-  {id:"ch8",  name:"石田 湊",   school:"junior",     pickupTime:15,   segments:[mkSeg(15,17,"work")]},
-  {id:"ch9",  name:"橋本 凪",   school:"junior",     pickupTime:14.5, segments:[mkSeg(14.5,17,"work")]},
-  {id:"ch10", name:"小野 陽菜", school:"high",       pickupTime:15,   segments:[mkSeg(15,17,"work")]},
-  {id:"ch11", name:"上田 陽",   school:"nursery",    pickupTime:13,   segments:[mkSeg(13,17,"work")]},
-  {id:"ch12", name:"大野 結",   school:"nursery",    pickupTime:13.5, segments:[mkSeg(13.5,17,"work")]},
-];
+const INIT_STAFF = [];
+const INIT_CHILDREN = [];
 
 // ─── マスターデータ初期値 ────────────────────────────────────
-const INIT_MASTER_STAFF = [
-  {id:"st1",  name:"山田 花子", stype:"fulltime"},
-  {id:"st2",  name:"鈴木 一郎", stype:"fulltime"},
-  {id:"st3",  name:"佐藤 美咲", stype:"fulltime"},
-  {id:"st4",  name:"田中 健太", stype:"part"},
-  {id:"st5",  name:"小林 直樹", stype:"part"},
-  {id:"st6",  name:"高橋 由美", stype:"part"},
-  {id:"st7",  name:"伊藤 春香", stype:"timee"},
-  {id:"st8",  name:"渡辺 大輔", stype:"timee"},
-  {id:"st9",  name:"中村 麻衣", stype:"help"},
-];
-const INIT_MASTER_CHILDREN = [
-  {id:"ch1",  name:"赤坂 蓮",   school:"elementary"},
-  {id:"ch2",  name:"青木 花",   school:"elementary"},
-  {id:"ch3",  name:"石川 空",   school:"elementary"},
-  {id:"ch4",  name:"岡田 樹",   school:"elementary"},
-  {id:"ch5",  name:"加藤 朱",   school:"elementary"},
-  {id:"ch6",  name:"木村 碧",   school:"elementary"},
-  {id:"ch7",  name:"伊藤 葵",   school:"junior"},
-  {id:"ch8",  name:"石田 湊",   school:"junior"},
-  {id:"ch9",  name:"橋本 凪",   school:"junior"},
-  {id:"ch10", name:"小野 陽菜", school:"high"},
-  {id:"ch11", name:"上田 陽",   school:"nursery"},
-  {id:"ch12", name:"大野 結",   school:"nursery"},
-];
+const INIT_MASTER_STAFF = [];
+const INIT_MASTER_CHILDREN = [];
 
 // 当日データの人員エントリをマスターから生成（segments空）
 const mkDayStaff   = m => ({...m, segments:[]});
@@ -126,7 +128,7 @@ const INIT_DEFAULTS = (()=>{
     DAYS_EN.forEach(day=>{
       // 日曜は休みにしておく
       const active = day !== "sun";
-      d[s.id][day] = { active, workStart: toHM(work.start), workEnd: toHM(work.end) };
+      d[s.id][day] = { active:true, workStart: toHM(work.start), workEnd: toHM(work.end) };
     });
   });
   // 児童：在所(work)とpickupTimeを登録
@@ -136,7 +138,7 @@ const INIT_DEFAULTS = (()=>{
     DAYS_EN.forEach(day=>{
       const active = day !== "sun" && day !== "sat";
       d[c.id][day] = {
-        active,
+        active:true,
         pickupTime: c.pickupTime!=null ? toHM(c.pickupTime) : "",
         stayStart:  work ? toHM(work.start) : "",
         stayEnd:    work ? toHM(work.end)   : "",
@@ -194,16 +196,16 @@ const ST43 = {pointerEvents:"none"};
 const ST44 = {position:"absolute",top:0,left:0,pointerEvents:"none",zIndex:5};
 const ST45 = {display:"block",pointerEvents:"none"};
 const ST46 = {pointerEvents:"none",userSelect:"none"};
-const ST47 = {display:"flex",flexDirection:"column",alignItems:"stretch",flexShrink:0};
-const ST48 = {display:"flex",alignItems:"center",justifyContent:"space-between",padding:"4px 6px",background:"#0a1628",borderBottom:"1px solid #1e293b",minHeight:32};
+const ST47 = {display:"flex",flexDirection:"column",alignItems:"stretch",flexShrink:0,borderRight:"1px solid #334155"};
+const ST48 = {display:"flex",alignItems:"center",justifyContent:"space-between",padding:"4px 6px",background:"#0a1628",borderBottom:"1px solid #1e293b",height:32,boxSizing:"border-box",flexShrink:0};
 const ST49 = {fontSize:11,fontWeight:800,color:"#94a3b8"};
 const ST50 = {fontSize:9,fontWeight:800,padding:"2px 6px",borderRadius:4,border:"none",cursor:"pointer",background:"#1e293b",color:"#64748b"};
-const ST51 = {display:"block",cursor:"crosshair"};
+const ST51 = {display:"block",cursor:"crosshair",overflow:"visible",opacity:1};
 const ST52 = {cursor:"grab"};
 const ST53 = {cursor:"ns-resize"};
 const ST54 = {cursor:"ns-resize"};
 const ST55 = {userSelect:"none",pointerEvents:"none"};
-const ST56 = {opacity:0,transition:"opacity 0.15s"};
+const ST56 = {pointerEvents:"none"};
 const ST57 = {pointerEvents:"none"};
 const ST58 = {cursor:"ns-resize"};
 const ST59 = {cursor:"ns-resize"};
@@ -225,12 +227,12 @@ const ST74 = {display:"flex",alignItems:"center",gap:3};
 const ST75 = {display:"flex",alignItems:"center",gap:6,background:"#0f172a",border:"1px solid #1e293b",borderRadius:6,padding:"4px 9px",fontSize:11,fontWeight:700,color:"#94a3b8",cursor:"pointer"};
 const ST76 = {display:"inline-block",width:7,height:7,borderRadius:"50%",background:"currentColor",flexShrink:0};
 const ST77 = {background:"none",border:"none",cursor:"pointer",fontSize:13,color:"#334155",padding:"2px 4px",transition:"color 0.15s"};
-const ST78 = {overflowX:"auto",borderRadius:8,border:"1px solid #1e293b"};
+const ST78 = {overflowX:"auto",overflowY:"visible",borderRadius:8,border:"1px solid #1e293b"};
 const ST79 = {display:"flex",alignItems:"flex-start",minWidth:"max-content"};
 const ST80 = {flexShrink:0,display:"flex",flexDirection:"column"};
-const ST81 = {height:32,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,color:"#334155",fontWeight:600,background:"#0a1628",borderBottom:"1px solid #1e293b",paddingLeft:6};
+const ST81 = {height:32,boxSizing:"border-box",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,color:"#334155",fontWeight:600,background:"#0a1628",borderBottom:"1px solid #1e293b",paddingLeft:6};
 const ST82 = {display:"flex",flexDirection:"column"};
-const ST83 = {height:CH,display:"flex",alignItems:"flex-start",paddingTop:2,fontSize:10,color:"#334155",paddingLeft:4,borderTop:"1px solid #0f172a"};
+const ST83 = {height:36,boxSizing:"border-box",display:"flex",alignItems:"flex-start",paddingTop:2,fontSize:10,color:"#334155",paddingLeft:4,borderTop:"1px solid #0f172a"};
 const ST84 = {fontSize:9.5,color:"#334155",marginTop:6,textAlign:"center"};
 const ST85 = {color:"#60a5fa"};
 
@@ -266,11 +268,13 @@ function GlobalDefs() {
 }
 
 // ─── 時間 → Y座標変換 ────────────────────────────────────────
-const tY  = t => (t - H_START) * CH;           // 時間 → px
+let tY = t => (t - H_START) * CH;              // 時間 → px（CH動的更新）
 const Yt  = y => sv(clamp(y / CH + H_START, H_START, H_END)); // px → スナップ時間
 
 // ─── 人員チェック（横帯グラフ） ─────────────────────────────
 function StaffingBar({ staff, children, hoverT, onHover, colW }) {
+  const {hStart:H_START,hEnd:H_END,hTotal:H_TOTAL,ch:CH,totalH:TOTAL_H} = useG();
+  const tY = t => (t - H_START) * CH;
   const slots = useMemo(()=>{
     const s=[];
     for(let t=H_START;t<H_END;t+=0.25){
@@ -328,6 +332,8 @@ function StaffingBar({ staff, children, hoverT, onHover, colW }) {
 
 // ─── 職員セグメント（縦バー）────────────────────────────────
 function StaffCol({ person, colW, onUpdate, onDelete, onAdd, hoverT }) {
+  const {hStart:H_START,hEnd:H_END,hTotal:H_TOTAL,ch:CH,totalH:TOTAL_H} = useG();
+  const tY = t => (t - H_START) * CH;
   const color = (STAFF_TYPES[person.stype]&&STAFF_TYPES[person.stype].color) || "#3b82f6";
   const BX = 4, BW = colW - 8; // バーのx・幅
   const dragRef = useRef(null);
@@ -366,12 +372,11 @@ function StaffCol({ person, colW, onUpdate, onDelete, onAdd, hoverT }) {
     window.addEventListener("mousemove",mm); window.addEventListener("mouseup",mu);
   };
 
-  // 空白ドラッグで新セグ追加（Ctrl/Shift押下時はバー上からも呼ばれる）
+  // 空白ドラッグで新セグ追加（Ctrl/Shift/Alt押下時はバー上からも呼ばれる）
   const handleSvgDown = e => {
     const isTransfer = e.shiftKey, isBreak = e.ctrlKey || e.metaKey;
     const onBackground = e.target === svgRef.current || e.target.tagName === "line";
     if (!onBackground && !isTransfer && !isBreak) return;
-    // Ctrl/Shiftなしで背景以外（バーのリサイズハンドル等）は無視
     if (!isTransfer && !isBreak && !onBackground) return;
     const segType = isTransfer ? "transfer" : isBreak ? "break" : "work";
     const t0 = getT(e.clientY);
@@ -617,8 +622,11 @@ function StaffCol({ person, colW, onUpdate, onDelete, onAdd, hoverT }) {
 }
 
 // ─── 児童セグメント（縦バー）────────────────────────────────
-function ChildCol({ person, colW, onUpdate, onDelete, onAdd, onPickupChange, hoverT }) {
-  const color = (SCHOOL_GROUPS[person.school]&&SCHOOL_GROUPS[person.school].color) || "#64748b";
+function ChildCol({ person, colW, onUpdate, onDelete, onAdd, onPickupChange, hoverT, schoolGroups: SG }) {
+  const {hStart:H_START,hEnd:H_END,hTotal:H_TOTAL,ch:CH,totalH:TOTAL_H} = useG();
+  const tY = t => (t - H_START) * CH;
+  const SG2 = SG || SCHOOL_GROUPS;
+  const color = (SG2[person.school]&&SG2[person.school].color) || "#64748b";
   const BX = 3, BW = colW - 6;
   const dragRef = useRef(null);
   const [ghost, setGhost] = useState(null);
@@ -649,6 +657,11 @@ function ChildCol({ person, colW, onUpdate, onDelete, onAdd, onPickupChange, hov
   const handleSvgDown = e => {
     if (e.target !== svgRef.current && e.target.tagName !== "line") return;
     e.preventDefault();
+    if(e.altKey){
+      // Alt+クリック: お迎え時刻ピン設定
+      onPickupChange(getT(e.clientY));
+      return;
+    }
     const t0 = getT(e.clientY); let moved = false;
     setGhost({start:t0, end:Math.min(t0+1,H_END)});
     const mm = ev => { moved=true; const t1=getT(ev.clientY); setGhost({start:Math.min(t0,t1),end:Math.max(t0,t1)}); };
@@ -731,14 +744,16 @@ function ChildCol({ person, colW, onUpdate, onDelete, onAdd, onPickupChange, hov
 
       
       {pinY!=null&&(
-        <g style={ST40} onMouseDown={startPinDrag}>
-          
+        <g style={ST40}
+          onMouseDown={startPinDrag}
+          onDoubleClick={e=>{e.stopPropagation();onPickupChange(null);}}>
           <line x1={0} y1={pinY} x2={colW} y2={pinY} stroke="#fbbf24" strokeWidth={1.5} strokeDasharray="3,2"/>
-          
           <rect x={0} y={pinY-18} width={colW} height={22} fill="transparent"/>
-          
           <text x={BX+1} y={pinY-14} fontSize={11} fill="#fbbf24" style={ST41}>📌</text>
           <text x={BX+14} y={pinY-5} fontSize={10} fill="#fbbf24" fontWeight="800" style={ST42}>{toHM(person.pickupTime)}</text>
+          {/* 削除ボタン */}
+          <circle cx={colW-7} cy={pinY-9} r={6} fill="#0a0f1a" opacity={0.9}/>
+          <text x={colW-7} y={pinY-5} textAnchor="middle" fontSize={9} fill="#ef4444" style={{cursor:"pointer",userSelect:"none"}}>×</text>
         </g>
       )}
 
@@ -770,6 +785,8 @@ function ChildCol({ person, colW, onUpdate, onDelete, onAdd, onPickupChange, hov
 // 同じルート番号の職員列を、送迎時間帯の範囲でルート色の破線ボックスで囲む
 // colMeta: [{ id, x, w }]  職員の表示順・列X・列幅
 function RouteOverlay({ staff, colMeta }) {
+  const {hStart:H_START,hEnd:H_END,hTotal:H_TOTAL,ch:CH,totalH:TOTAL_H} = useG();
+  const tY = t => (t - H_START) * CH;
   // ルートごとに時間帯union
   const routeSpans = useMemo(()=>{
     const map = {};
@@ -833,17 +850,18 @@ function RouteOverlay({ staff, colMeta }) {
 // 曜日を横軸、時間を縦軸にした週間ビュー
 // DH = 1時間の高さ（デフォルト画面用、日々管理より小さめ）
 const DH = 36;
-const D_TOTAL = H_TOTAL * DH;
+let D_TOTAL = H_TOTAL * DH;
 const D_TW = 38; // 時間軸幅
 const D_CW = 72; // 1曜日の幅
 
-function DefaultDayCol({ day, dayLabel, dayColor, person, isStaff, defDay, onDefChange, colW }) {
+function DefaultDayCol({ day, dayLabel, dayColor, person, isStaff, defDay, onDefChange, colW, onCopyDragStart }) {
+  const {hStart:H_START,hEnd:H_END,hTotal:H_TOTAL,ch:CH,totalH:TOTAL_H} = useG();
   const svgRef = useRef(null);
   const dragRef = useRef(null);
   const [ghost, setGhost] = useState(null);
   const color = isStaff
     ? ((STAFF_TYPES[person.stype]&&STAFF_TYPES[person.stype].color) || "#3b82f6")
-    : ((SCHOOL_GROUPS[person.school]&&SCHOOL_GROUPS[person.school].color) || "#64748b");
+    : ((SCHOOL_GROUPS[person.school]&&SCHOOL_GROUPS[person.school].color) || "#64748b"); // グローバルは都度更新済
   const BX=3, BW=colW-6;
 
   const getT = clientY => {
@@ -856,25 +874,34 @@ function DefaultDayCol({ day, dayLabel, dayColor, person, isStaff, defDay, onDef
   const workSeg = (() => {
     if(isStaff) {
       const ws=frHM(defDay&&defDay.workStart), we=frHM(defDay&&defDay.workEnd);
-      return ws!=null&&we!=null&&defDay&&defDay.active ? {id:"work",start:ws,end:we,type:"work"} : null;
+      return ws!=null&&we!=null ? {id:"work",start:ws,end:we,type:"work"} : null;
     } else {
       const ss=frHM(defDay&&defDay.stayStart), se=frHM(defDay&&defDay.stayEnd);
-      return ss!=null&&se!=null&&defDay&&defDay.active ? {id:"work",start:ss,end:se,type:"work"} : null;
+      return ss!=null&&se!=null ? {id:"work",start:ss,end:se,type:"work"} : null;
     }
   })();
 
   // 休憩セグメント（defDay.breaks = [{id,start,end}]）
-  const breaks = (defDay&&defDay.active && defDay&&defDay.breaks) ? defDay.breaks : [];
+  const breaks = (defDay&&defDay.breaks) ? defDay.breaks : [];
 
-  const pickupT = !isStaff && defDay&&defDay.active ? frHM(defDay&&defDay.pickupTime) : null;
+  const pickupT = !isStaff ? frHM(defDay&&defDay.pickupTime) : null;
 
   // 在所バーのドラッグ
-  const startWorkDrag = (e, seg, mode) => {
+  const startWorkDrag = (e, seg, dragMode) => {
     e.stopPropagation(); e.preventDefault();
     const t0=getT(e.clientY), dur=seg.end-seg.start;
-    dragRef.current={mode,t0,s0:seg.start,e0:seg.end};
+    dragRef.current={mode:dragMode,t0,s0:seg.start,e0:seg.end};
+    let copyMode = false;
     const mm=ev=>{
       if(!dragRef.current)return;
+      if(dragMode==="move" && (ev.ctrlKey||ev.metaKey) && onCopyDragStart && !copyMode){
+        copyMode=true;
+        dragRef.current=null;
+        window.removeEventListener("mousemove",mm);
+        window.removeEventListener("mouseup",mu);
+        onCopyDragStart(ev, {type:"work", seg});
+        return;
+      }
       const dt=getT(ev.clientY)-dragRef.current.t0;
       const{mode,s0,e0}=dragRef.current;
       if(mode==="move"){
@@ -894,14 +921,23 @@ function DefaultDayCol({ day, dayLabel, dayColor, person, isStaff, defDay, onDef
   };
 
   // 休憩バーのドラッグ
-  const startBreakDrag = (e, brk, mode, overrideY) => {
+  const startBreakDrag = (e, brk, dragMode, overrideY) => {
     e.stopPropagation(); e.preventDefault();
     const startY = overrideY || e.clientY;
     const t0=getT(startY), dur=brk.end-brk.start;
-    dragRef.current={mode,t0,s0:brk.start,e0:brk.end};
+    dragRef.current={mode:dragMode,t0,s0:brk.start,e0:brk.end};
+    let copyMode = false;
     const upd = patch => onDefChange({...defDay, breaks: breaks.map(b=>b.id===brk.id?{...b,...patch}:b)});
     const mm=ev=>{
       if(!dragRef.current)return;
+      if(dragMode==="move" && (ev.ctrlKey||ev.metaKey) && onCopyDragStart && !copyMode){
+        copyMode=true;
+        dragRef.current=null;
+        window.removeEventListener("mousemove",mm);
+        window.removeEventListener("mouseup",mu);
+        onCopyDragStart(ev, {type:"break", brk});
+        return;
+      }
       const dt=getT(ev.clientY)-dragRef.current.t0;
       const{mode,s0,e0}=dragRef.current;
       if(mode==="move") upd({start:sv(clamp(s0+dt,H_START,H_END-dur)),end:sv(clamp(s0+dt+dur,H_START+dur,H_END))});
@@ -922,9 +958,15 @@ function DefaultDayCol({ day, dayLabel, dayColor, person, isStaff, defDay, onDef
 
   // 空白クリック・ドラッグ
   const handleDown = e => {
-    if(e.target!==svgRef.current&&e.target.tagName!=="line")return;
+    const isBreak = e.altKey && isStaff;
+    const isPin   = e.altKey && !isStaff;
+    if(e.target!==svgRef.current&&e.target.tagName!=="line"&&!isBreak&&!isPin)return;
     e.preventDefault();
-    const isBreak = e.ctrlKey || e.metaKey;
+    if(isPin){
+      const t = getT(e.clientY);
+      onDefChange({...defDay, pickupTime:toHM(t)});
+      return;
+    }
     const t0=getT(e.clientY); let moved=false;
     setGhost({start:t0, end:Math.min(t0+1,H_END), isBreak});
 
@@ -941,7 +983,7 @@ function DefaultDayCol({ day, dayLabel, dayColor, person, isStaff, defDay, onDef
       const end=sv(Math.max(t0,moved?t1:Math.min(t0+1,H_END)));
       if(end-start<MIN_DUR)return;
       if(isBreak) {
-        // 休憩追加
+        // 休憩追加（職員のみ・isBreak=altKey&&isStaffで既に保証）
         onDefChange({...defDay, active:true, breaks:[...breaks, {id:uid(),start,end}]});
       } else {
         // 在所追加
@@ -953,7 +995,7 @@ function DefaultDayCol({ day, dayLabel, dayColor, person, isStaff, defDay, onDef
   };
 
   const tDY = t => (t-H_START)*DH;
-  const active = defDay&&defDay.active || false;
+  const active = true;
   const pinY = pickupT!=null ? tDY(pickupT) : null;
 
   return (
@@ -961,10 +1003,6 @@ function DefaultDayCol({ day, dayLabel, dayColor, person, isStaff, defDay, onDef
       
       <div style={ST48}>
         <div style={ST49}>{dayLabel}</div>
-        <button onClick={()=>onDefChange({...defDay,active:!active})}
-          style={ST50}>
-          {active?"ON":"OFF"}
-        </button>
       </div>
       
       <svg ref={svgRef} width={colW} height={D_TOTAL}
@@ -974,6 +1012,7 @@ function DefaultDayCol({ day, dayLabel, dayColor, person, isStaff, defDay, onDef
           <line key={i} x1={0} y1={i*DH} x2={colW} y2={i*DH}
             stroke="#1e293b" strokeWidth={i%2===0?0.8:0.3}/>
         ))}
+        <line x1={colW-1} y1={0} x2={colW-1} y2={D_TOTAL} stroke="#334155" strokeWidth={1}/>
 
         
         {workSeg&&(()=>{
@@ -982,14 +1021,14 @@ function DefaultDayCol({ day, dayLabel, dayColor, person, isStaff, defDay, onDef
           return (
             <g key="work">
               <rect x={BX} y={y+1} width={BW} height={h} rx={3} fill={color} opacity={0.8}
-                style={ST52} onMouseDown={e=>startWorkDrag(e,seg,"move")}/>
+                style={ST52} onMouseDown={e=>{ if(e.altKey){ handleDown(e); return; } startWorkDrag(e,seg,"move"); }}/>
               <rect x={BX} y={y+1} width={BW} height={6} rx={2} fill="rgba(255,255,255,0.2)"
                 style={ST53} onMouseDown={e=>startWorkDrag(e,seg,"top")}/>
               <rect x={BX} y={y+h-5} width={BW} height={6} rx={2} fill="rgba(255,255,255,0.2)"
                 style={ST54} onMouseDown={e=>startWorkDrag(e,seg,"bottom")}/>
               <g onMouseDown={e=>e.stopPropagation()} onClick={()=>
-                isStaff ? onDefChange({...defDay,active:false,workStart:"",workEnd:""})
-                        : onDefChange({...defDay,active:false,stayStart:"",stayEnd:""})}>
+                isStaff ? onDefChange({...defDay,workStart:"",workEnd:""})
+                        : onDefChange({...defDay,stayStart:"",stayEnd:""})}>
                 <circle cx={BX+BW-4} cy={y+7} r={5} fill="#0a0f1a" opacity={0.85}/>
                 <text x={BX+BW-4} y={y+11} textAnchor="middle" fontSize={8} fill="#64748b" style={ST55}>×</text>
               </g>
@@ -1047,11 +1086,15 @@ function DefaultDayCol({ day, dayLabel, dayColor, person, isStaff, defDay, onDef
 
         
         {pinY!=null&&(
-          <g style={ST66} onMouseDown={startPinDrag}>
+          <g style={ST66}
+            onMouseDown={startPinDrag}
+            onDoubleClick={e=>{e.stopPropagation();onDefChange({...defDay,pickupTime:""});}}>
             <line x1={0} y1={pinY} x2={colW} y2={pinY} stroke="#fbbf24" strokeWidth={1.5} strokeDasharray="3,2"/>
             <rect x={0} y={pinY-14} width={colW} height={18} fill="transparent"/>
             <text x={BX+1} y={pinY-8} fontSize={9} fill="#fbbf24" style={ST67}>📌</text>
             <text x={BX+12} y={pinY-1} fontSize={7.5} fill="#fbbf24" fontWeight="800" style={ST68}>{toHM(pickupT)}</text>
+            <circle cx={colW-6} cy={pinY-7} r={5} fill="#0a0f1a" opacity={0.9}/>
+            <text x={colW-6} y={pinY-3} textAnchor="middle" fontSize={8} fill="#ef4444" style={{cursor:"pointer",userSelect:"none"}}>×</text>
           </g>
         )}
         
@@ -1068,12 +1111,123 @@ function DefaultDayCol({ day, dayLabel, dayColor, person, isStaff, defDay, onDef
   );
 }
 
-function DefaultsScreen({ staff, children, master, defaults, setDefaults, onExport, onImportClick, onAddStaff, onAddChild, onDelMaster }) {
+
+const COLOR_PRESETS = ["#3b82f6","#10b981","#f59e0b","#a855f7","#ef4444","#06b6d4","#ec4899","#f97316","#84cc16","#64748b","#8b5cf6","#14b8a6"];
+
+function CategoriesScreen({ staffTypes, setStaffTypes, schoolGroups, setSchoolGroups }) {
+  const [mode, setMode] = useState("staff");
+  const types = mode==="staff" ? staffTypes : schoolGroups;
+  const setTypes = mode==="staff" ? setStaffTypes : setSchoolGroups;
+  const [editKey, setEditKey] = useState(null);
+  const [editLabel, setEditLabel] = useState("");
+  const [editColor, setEditColor] = useState("");
+  const [newKey, setNewKey] = useState("");
+  const [newLabel, setNewLabel] = useState("");
+  const [newColor, setNewColor] = useState("#3b82f6");
+  const [err, setErr] = useState("");
+
+  const startEdit = (k) => { setEditKey(k); setEditLabel(types[k].label); setEditColor(types[k].color); setErr(""); };
+  const saveEdit = () => {
+    if(!editLabel.trim()){setErr("ラベルを入力してください");return;}
+    setTypes({...types, [editKey]:{...types[editKey], label:editLabel.trim(), color:editColor}});
+    setEditKey(null);
+  };
+  const addNew = () => {
+    const k = newKey.trim();
+    if(!k){setErr("キーを入力してください");return;}
+    if(types[k]){setErr("そのキーは既に存在します");return;}
+    if(!newLabel.trim()){setErr("ラベルを入力してください");return;}
+    setTypes({...types, [k]:{label:newLabel.trim(), color:newColor}});
+    setNewKey(""); setNewLabel(""); setNewColor("#3b82f6"); setErr("");
+  };
+  const del = (k) => {
+    const next = {...types}; delete next[k]; setTypes(next);
+  };
+
+  return (
+    <div style={{maxWidth:520}}>
+      <div style={{display:"flex",gap:6,marginBottom:18}}>
+        {[{k:"staff",lbl:"職員区分"},{k:"child",lbl:"児童区分"}].map(item=>(
+          <button key={item.k} onClick={()=>{setMode(item.k);setEditKey(null);setErr("");}}
+            style={BS(mode===item.k?"#2563eb":"#1e293b",mode===item.k?"#fff":"#64748b")}>{item.lbl}</button>
+        ))}
+      </div>
+
+      <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:20}}>
+        {Object.keys(types).map(k=>{
+          const v=types[k];
+          return (
+            <div key={k} style={{display:"flex",alignItems:"center",gap:8,background:"#0f172a",border:"1px solid #1e293b",borderRadius:8,padding:"8px 12px"}}>
+              <div style={{width:12,height:12,borderRadius:"50%",background:v.color,flexShrink:0}}/>
+              {editKey===k ? (
+                <>
+                  <input value={editLabel} onChange={e=>setEditLabel(e.target.value)}
+                    onKeyDown={e=>{if(e.key==="Enter")saveEdit();if(e.key==="Escape")setEditKey(null);}}
+                    style={{...IS,width:120,padding:"3px 8px"}} autoFocus/>
+                  <div style={{display:"flex",gap:3,flexWrap:"wrap"}}>
+                    {COLOR_PRESETS.map(c=>(
+                      <div key={c} onClick={()=>setEditColor(c)}
+                        style={{width:16,height:16,borderRadius:"50%",background:c,cursor:"pointer",border:editColor===c?"2px solid #fff":"2px solid transparent"}}/>
+                    ))}
+                  </div>
+                  <button onClick={saveEdit} style={{...BS("#2563eb","#fff"),padding:"3px 10px",fontSize:10}}>✓</button>
+                  <button onClick={()=>setEditKey(null)} style={{...BS("#1e293b","#64748b"),padding:"3px 10px",fontSize:10}}>✕</button>
+                </>
+              ) : (
+                <>
+                  <span style={{fontSize:11,color:"#94a3b8",minWidth:60}}>{k}</span>
+                  <span style={{fontSize:12,fontWeight:700,color:v.color,flex:1}}>{v.label}</span>
+                  <button onClick={()=>startEdit(k)} style={{...BS("#1e293b","#60a5fa"),padding:"3px 10px",fontSize:10}}>編集</button>
+                  <button onClick={()=>del(k)}
+                    style={{...BS("#1e293b","#334155"),padding:"3px 10px",fontSize:10}}
+                    onMouseEnter={e=>{e.currentTarget.style.color="#ef4444";}}
+                    onMouseLeave={e=>{e.currentTarget.style.color="#334155";}}>🗑</button>
+                </>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{background:"#070d18",border:"1px solid #1e3a5f",borderRadius:10,padding:"14px 16px"}}>
+        <div style={{fontSize:11,fontWeight:700,color:"#60a5fa",marginBottom:10}}>＋ 新しい区分を追加</div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-end"}}>
+          <FF label="キー（英数字）">
+            <input value={newKey} onChange={e=>setNewKey(e.target.value.replace(/[^a-zA-Z0-9_]/g,""))}
+              style={{...IS,width:100}} placeholder="例: contract"/>
+          </FF>
+          <FF label="表示名">
+            <input value={newLabel} onChange={e=>setNewLabel(e.target.value)}
+              style={{...IS,width:120}} placeholder="例: 契約社員"/>
+          </FF>
+          <FF label="色">
+            <div style={{display:"flex",gap:3,flexWrap:"wrap",maxWidth:160}}>
+              {COLOR_PRESETS.map(c=>(
+                <div key={c} onClick={()=>setNewColor(c)}
+                  style={{width:18,height:18,borderRadius:"50%",background:c,cursor:"pointer",border:newColor===c?"2px solid #fff":"2px solid transparent"}}/>
+              ))}
+            </div>
+          </FF>
+          <button onClick={addNew} style={{...BS("#2563eb","#fff"),marginBottom:10}}>追加</button>
+        </div>
+        {err&&<div style={{color:"#ef4444",fontSize:11,marginTop:4}}>{err}</div>}
+      </div>
+      <p style={{fontSize:10,color:"#475569",marginTop:10}}>
+        ※ キーは変更できません。既存の職員・児童に割り当てられた区分キーを削除しても、その人のデータには残ります。
+      </p>
+    </div>
+  );
+}
+
+function DefaultsScreen({ staff, children, master, defaults, setDefaults, onExport, onImportClick, onAddStaff, onAddChild, onDelMaster, onRename, onCopy }) {
   const [mode, setMode] = useState("staff");
   const [selId, setSelId] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [editingName, setEditingName] = useState("");
+  const [editingSubtype, setEditingSubtype] = useState("");
   const persons = mode==="staff" ? staff : children;
-  const sel = persons.find(p=>p.id===selId) || persons[0];
-  const selIdEff = sel&&sel.id || null;
+  const sel = persons.length>0 ? (persons.find(p=>p.id===selId) || persons[0]) : null;
+  const selIdEff = sel ? sel.id : null;
 
   const getDay = day => (defaults[selIdEff]&&defaults[selIdEff][day]) || {active:false};
   const setDay = (day,patch) => setDefaults(prev=>({
@@ -1081,6 +1235,47 @@ function DefaultsScreen({ staff, children, master, defaults, setDefaults, onExpo
   }));
 
   const timeLabels = Array.from({length:H_TOTAL+1},(_,i)=>H_START+i);
+  const chartRef = useRef(null);
+  const [copyGhost, setCopyGhost] = useState(null); // {dayIdx, type, seg/brk, srcDay}
+
+  const onCopyDragStart = (e, payload, srcDay) => {
+    e.stopPropagation(); e.preventDefault();
+    const getDayIdx = clientX => {
+      if(!chartRef.current) return -1;
+      const rect = chartRef.current.getBoundingClientRect();
+      const x = clientX - rect.left - D_TW; // 時間軸ラベル列分を引く
+      const idx = Math.floor(x / D_CW);
+      return Math.max(0, Math.min(6, idx));
+    };
+    let curIdx = getDayIdx(e.clientX);
+    setCopyGhost({dayIdx:curIdx, ...payload, srcDay});
+    const mm = ev => {
+      const idx = getDayIdx(ev.clientX);
+      if(idx !== curIdx){ curIdx = idx; setCopyGhost(g=>g?{...g,dayIdx:idx}:null); }
+    };
+    const mu = ev => {
+      window.removeEventListener("mousemove", mm);
+      window.removeEventListener("mouseup", mu);
+      const idx = getDayIdx(ev.clientX);
+      const destDay = DAYS_EN[idx];
+      if(destDay && destDay !== srcDay) {
+        const destDef = getDay(destDay);
+        if(payload.type==="work") {
+          const {seg} = payload;
+          mode==="staff"
+            ? setDay(destDay, {...destDef, workStart:toHM(seg.start), workEnd:toHM(seg.end)})
+            : setDay(destDay, {...destDef, stayStart:toHM(seg.start), stayEnd:toHM(seg.end)});
+        } else {
+          const {brk} = payload;
+          const destBreaks = (destDef.breaks||[]);
+          setDay(destDay, {...destDef, breaks:[...destBreaks, {id:uid(), start:brk.start, end:brk.end}]});
+        }
+      }
+      setCopyGhost(null);
+    };
+    window.addEventListener("mousemove", mm);
+    window.addEventListener("mouseup", mu);
+  };
 
   return (
     <div>
@@ -1109,12 +1304,39 @@ function DefaultsScreen({ staff, children, master, defaults, setDefaults, onExpo
           const act=p.id===selIdEff;
           return (
             <div key={p.id} style={ST74}>
-              <button onClick={()=>setSelId(p.id)}
-                style={ST75}>
-                <span style={ST76}/>
-                {p.name}
-              </button>
-              
+              {editingId===p.id ? (
+                <div style={{display:"flex",alignItems:"center",gap:4}}>
+                  <input autoFocus value={editingName}
+                    onChange={e=>setEditingName(e.target.value)}
+                    onKeyDown={e=>{
+                      if(e.key==="Enter"){onRename(p.id,mode==="staff"?"staff":"child",editingName,editingSubtype);setEditingId(null);}
+                      if(e.key==="Escape"){setEditingId(null);}
+                    }}
+                    style={{background:"#0f172a",border:"1px solid "+c,borderRadius:6,padding:"4px 8px",fontSize:11,fontWeight:700,color:c,width:90}}/>
+                  <select value={editingSubtype} onChange={e=>setEditingSubtype(e.target.value)}
+                    style={{background:"#0f172a",border:"1px solid #334155",borderRadius:6,padding:"4px 6px",fontSize:10,color:"#94a3b8",cursor:"pointer"}}>
+                    {mode==="staff"
+                      ? Object.keys(STAFF_TYPES).map(k=><option key={k} value={k}>{STAFF_TYPES[k].label}</option>)
+                      : Object.keys(SCHOOL_GROUPS).map(k=><option key={k} value={k}>{SCHOOL_GROUPS[k].label}</option>)
+                    }
+                  </select>
+                  <button onClick={()=>{onRename(p.id,mode==="staff"?"staff":"child",editingName,editingSubtype);setEditingId(null);}}
+                    style={{...BS("#2563eb","#fff"),padding:"3px 8px",fontSize:10}}>✓</button>
+                  <button onClick={()=>setEditingId(null)}
+                    style={{...BS("#1e293b","#64748b"),padding:"3px 8px",fontSize:10}}>✕</button>
+                </div>
+              ) : (
+                <button onClick={()=>setSelId(p.id)} onDoubleClick={()=>{setEditingId(p.id);setEditingName(p.name);setEditingSubtype(mode==="staff"?p.stype:p.school);}}
+                  style={{display:"flex",alignItems:"center",gap:6,
+                    background:act?"#1e3a5f":"#0f172a",
+                    border:"1px solid "+(act?c:"#1e293b"),
+                    borderRadius:6,padding:"4px 9px",fontSize:11,fontWeight:700,
+                    color:act?c:"#94a3b8",cursor:"pointer",
+                    boxShadow:act?"0 0 0 2px "+c+"44":"none"}}>
+                  <span style={{display:"inline-block",width:7,height:7,borderRadius:"50%",background:c,flexShrink:0}}/>
+                  {p.name}
+                </button>
+              )}
               <button onClick={()=>onDelMaster(p.id, mode==="staff"?"staff":"child")}
                 style={ST77}
                 onMouseEnter={e=>{e.currentTarget.style.color="#ef4444";}}
@@ -1126,9 +1348,23 @@ function DefaultsScreen({ staff, children, master, defaults, setDefaults, onExpo
 
       
       {sel&&(
+        <div style={{display:"flex",justifyContent:"flex-end",marginBottom:6}}>
+          <button onClick={()=>onCopy(sel.id, mode==="staff"?"staff":"child")}
+            style={{...BS("#1e293b","#94a3b8"),border:"1px solid #334155",fontSize:11}}
+            onMouseEnter={e=>{e.currentTarget.style.borderColor="#60a5fa";e.currentTarget.style.color="#60a5fa";}}
+            onMouseLeave={e=>{e.currentTarget.style.borderColor="#334155";e.currentTarget.style.color="#94a3b8";}}>
+            📋 この{mode==="staff"?"職員":"児童"}をコピー
+          </button>
+        </div>
+      )}
+      {sel&&(
         <div style={ST78}>
-          <div style={ST79}>
-            
+          <div style={{...ST79, position:"relative"}} ref={chartRef}>
+            {copyGhost&&(
+              <div style={{position:"absolute",top:0,left:D_TW+copyGhost.dayIdx*D_CW,width:D_CW,height:"100%",
+                background:"rgba(96,165,250,0.12)",border:"2px solid #60a5fa",borderRadius:4,
+                pointerEvents:"none",zIndex:20,boxSizing:"border-box"}}/>
+            )}
             <div style={ST80}>
               <div style={ST81}>時間</div>
               <div style={ST82}>
@@ -1146,7 +1382,8 @@ function DefaultsScreen({ staff, children, master, defaults, setDefaults, onExpo
                   person={sel} isStaff={mode==="staff"}
                   defDay={getDay(day)}
                   onDefChange={patch=>setDay(day,patch)}
-                  colW={D_CW}/>
+                  colW={D_CW}
+                  onCopyDragStart={(e,payload)=>onCopyDragStart(e,payload,day)}/>
               );
             })}
           </div>
@@ -1154,8 +1391,7 @@ function DefaultsScreen({ staff, children, master, defaults, setDefaults, onExpo
       )}
       {sel&&(
         <p style={ST84}>
-          ドラッグで在所時間を追加 ／ <span style={ST85}>Ctrl+クリック or ドラッグで休憩を追加</span> ／ バー端で時間調整 ／ バー中央で移動
-          {mode==="child"&&" ／ 📌ドラッグでお迎え時刻変更"}
+          ドラッグで在所時間を追加 ／ <span style={ST85}>Alt+クリックで休憩(職員) or お迎えピン(児童)追加</span> ／ バー端で時間調整 ／ バー中央で移動 ／ 📌ドラッグでお迎え時刻変更
         </p>
       )}
     </div>
@@ -1185,7 +1421,7 @@ function buildDefaultCSV(defaults,staff,children) {
 function dlCSV(content,fn){const a=document.createElement("a");a.href=URL.createObjectURL(new Blob(["\uFEFF"+content],{type:"text/csv;charset=utf-8"}));a.download=fn;a.click();}
 
 // ─── メインアプリ ────────────────────────────────────────────
-export default function App() {
+function AppInner() {
   const todayStr = new Date().toISOString().slice(0,10);
   const [hStart, setHStart] = useState(8);
   const [hEnd,   setHEnd]   = useState(19);
@@ -1196,12 +1432,16 @@ export default function App() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
   // 表示は設定範囲±1時間、グローバル変数を更新
-  H_START = hStart - 1;
-  H_END   = hEnd   + 1;
-  H_TOTAL = H_END - H_START;
-  // ヘッダー約50px＋ツールバー約38px＋タブ行約36px＋人員ヘッダー(HDR_H)＋余白20px
-  CH      = Math.min(64, Math.max(24, Math.floor((winH - HDR_H - 160) / H_TOTAL)));
-  TOTAL_H = H_TOTAL * CH;
+  const gHStart = hStart - 1;
+  const gHEnd   = hEnd   + 1;
+  const gHTotal = gHEnd - gHStart;
+  const gCH     = Math.min(64, Math.max(24, Math.floor((winH - HDR_H - 160) / gHTotal)));
+  const gTotalH = gHTotal * gCH;
+  // グローバル変数も更新（tY等のグローバル関数のため）
+  H_START = gHStart; H_END = gHEnd; H_TOTAL = gHTotal; CH = gCH; TOTAL_H = gTotalH;
+  D_TOTAL = gHTotal * DH;
+  const tY = t => (t - gHStart) * gCH; // AppInner内ローカルtY
+  const gCtx = {hStart:gHStart, hEnd:gHEnd, hTotal:gHTotal, ch:gCH, totalH:gTotalH};
 
   // マスターデータ（全メンバー登録簿）
   // ── ストア初期化（1回のloadSで全データを整合させる）──
@@ -1242,6 +1482,10 @@ export default function App() {
     return s;
   });
 
+  const [staffTypes, setStaffTypesRaw] = useState(()=>{ const v=loadS().staffTypes||DEFAULT_STAFF_TYPES; STAFF_TYPES=v; return v; });
+  const setStaffTypes = next => { setStaffTypesRaw(next); STAFF_TYPES=next; const s=loadS(); s.staffTypes=next; saveS(s); };
+  const [schoolGroups, setSchoolGroupsRaw] = useState(()=>{ const v=loadS().schoolGroups||DEFAULT_SCHOOL_GROUPS; SCHOOL_GROUPS=v; return v; });
+  const setSchoolGroups = next => { setSchoolGroupsRaw(next); SCHOOL_GROUPS=next; const s=loadS(); s.schoolGroups=next; saveS(s); };
   const [master, setMasterRaw] = useState(()=>loadS().master);
   const setMaster = useCallback(fn=>{
     setMasterRaw(prev=>{
@@ -1258,7 +1502,7 @@ export default function App() {
   const [compact, setCompact] = useState(false);
   const [hoverT, setHoverT] = useState(null);
   const [modal, setModal]   = useState(null);
-  const [newMember, setNewMember] = useState({name:"",stype:"fulltime",school:"elementary",kind:"staff"});
+  const [newMember, setNewMember] = useState({name:"",stype:"fulltime",school:"elementary",kind:"staff",copyFromId:""});
   const [dragOver, setDragOver] = useState(null); // {id, isStaff}
   const [importTxt, setImportTxt] = useState("");
   const [importErr, setImportErr] = useState("");
@@ -1313,14 +1557,15 @@ export default function App() {
     if (newMember.kind==="staff") {
       const m = {id, name:newMember.name.trim(), stype:newMember.stype};
       setMaster(prev=>({...prev, staff:[...prev.staff, m]}));
-      if (staff.length<15) persistData({...data, staff:[...staff, mkDayStaff(m)]});
     } else {
       const m = {id, name:newMember.name.trim(), school:newMember.school};
       setMaster(prev=>({...prev, children:[...prev.children, m]}));
-      if (children.length<30) persistData({...data, children:[...children, mkDayChild(m)]});
+    }
+    if (newMember.copyFromId && defaults[newMember.copyFromId]) {
+      setDefaults(prev=>({...prev, [id]: deepc(defaults[newMember.copyFromId])}));
     }
     setModal(null);
-    setNewMember({name:"",stype:"fulltime",school:"elementary",kind:"staff"});
+    setNewMember({name:"",stype:"fulltime",school:"elementary",kind:"staff",copyFromId:""});
   };
 
   // 当日からのみ削除（マスターは残す）
@@ -1348,6 +1593,30 @@ export default function App() {
   const delFromMaster = (id, kind) => {
     if (kind==="staff") setMaster(prev=>({...prev, staff:prev.staff.filter(s=>s.id!==id)}));
     else setMaster(prev=>({...prev, children:prev.children.filter(c=>c.id!==id)}));
+  };
+
+  const renameMaster = (id, kind, newName, subtype) => {
+    if (!newName.trim()) return;
+    if (kind==="staff") setMaster(prev=>({...prev, staff:prev.staff.map(s=>s.id===id?{...s,name:newName.trim(),...(subtype?{stype:subtype}:{})}:s)}));
+    else setMaster(prev=>({...prev, children:prev.children.map(c=>c.id===id?{...c,name:newName.trim(),...(subtype?{school:subtype}:{})}:c)}));
+  };
+
+  const copyMaster = (id, kind) => {
+    const list = kind==="staff" ? master.staff : master.children;
+    const src = list.find(p=>p.id===id); if(!src) return;
+    const baseName = src.name.replace(/\(\d+\)$/, "").trim();
+    const existing = list.map(p=>p.name);
+    let n=1; while(existing.includes(baseName+"("+n+")")) n++;
+    const newId = uid();
+    const newName = baseName+"("+n+")";
+    if (kind==="staff") {
+      const m = {id:newId, name:newName, stype:src.stype};
+      setMaster(prev=>({...prev, staff:[...prev.staff, m]}));
+    } else {
+      const m = {id:newId, name:newName, school:src.school};
+      setMaster(prev=>({...prev, children:[...prev.children, m]}));
+    }
+    if (defaults[id]) setDefaults(prev=>({...prev, [newId]: deepc(defaults[id])}));
   };
 
   // 日付切替（マスターベース）
@@ -1380,19 +1649,10 @@ export default function App() {
     persistDates({...dates,[date]:cp});setToast("前日のデータをコピーしました");
   };
 
-  const saveAsDefault=()=>{
-    const dow=DAYS_EN[new Date(date).getDay()];
-    const patch={};
-    children.forEach(c=>{const s=c.segments.find(g=>g.type==="work");patch[c.id]={...(defaults[c.id]||{}),[dow]:{active:!!(s||c.pickupTime!=null),pickupTime:c.pickupTime!=null?toHM(c.pickupTime):"",stayStart:s?toHM(s.start):"",stayEnd:s?toHM(s.end):""}};});
-    staff.forEach(s=>{const w=s.segments.find(g=>g.type==="work");patch[s.id]={...(defaults[s.id]||{}),[dow]:{active:!!w,workStart:w?toHM(w.start):"",workEnd:w?toHM(w.end):""}};});
-    setDefaults(prev=>({...prev,...patch}));
-    setToast("✓ "+DAYS_JP[new Date(date).getDay()]+"曜日のデフォルトを保存しました");
-  };
-
   // 学校グループ別
   const groupedChildren = useMemo(()=>{
     const g={};children.forEach(c=>{if(!g[c.school])g[c.school]=[];g[c.school].push(c);});return g;
-  },[children]);
+  },[children, schoolGroups]);
 
   const dateObj = new Date(date);
   const dayColor = dateObj.getDay()===0?"#ef4444":dateObj.getDay()===6?"#3b82f6":"#64748b";
@@ -1417,10 +1677,52 @@ export default function App() {
 
   // 時間軸ラベル
   const timeLabels = Array.from({length:H_TOTAL+1},(_,i)=>H_START+i);
+  const chartRef = useRef(null);
+  const [copyGhost, setCopyGhost] = useState(null); // {dayIdx, type, seg/brk, srcDay}
+
+  const onCopyDragStart = (e, payload, srcDay) => {
+    e.stopPropagation(); e.preventDefault();
+    const getDayIdx = clientX => {
+      if(!chartRef.current) return -1;
+      const rect = chartRef.current.getBoundingClientRect();
+      const x = clientX - rect.left - D_TW; // 時間軸ラベル列分を引く
+      const idx = Math.floor(x / D_CW);
+      return Math.max(0, Math.min(6, idx));
+    };
+    let curIdx = getDayIdx(e.clientX);
+    setCopyGhost({dayIdx:curIdx, ...payload, srcDay});
+    const mm = ev => {
+      const idx = getDayIdx(ev.clientX);
+      if(idx !== curIdx){ curIdx = idx; setCopyGhost(g=>g?{...g,dayIdx:idx}:null); }
+    };
+    const mu = ev => {
+      window.removeEventListener("mousemove", mm);
+      window.removeEventListener("mouseup", mu);
+      const idx = getDayIdx(ev.clientX);
+      const destDay = DAYS_EN[idx];
+      if(destDay && destDay !== srcDay) {
+        const destDef = getDay(destDay);
+        if(payload.type==="work") {
+          const {seg} = payload;
+          mode==="staff"
+            ? setDay(destDay, {...destDef, workStart:toHM(seg.start), workEnd:toHM(seg.end)})
+            : setDay(destDay, {...destDef, stayStart:toHM(seg.start), stayEnd:toHM(seg.end)});
+        } else {
+          const {brk} = payload;
+          const destBreaks = (destDef.breaks||[]);
+          setDay(destDay, {...destDef, breaks:[...destBreaks, {id:uid(), start:brk.start, end:brk.end}]});
+        }
+      }
+      setCopyGhost(null);
+    };
+    window.addEventListener("mousemove", mm);
+    window.addEventListener("mouseup", mu);
+  };
 
   const appStyle = {fontFamily:"Noto Sans JP,Hiragino Kaku Gothic ProN,sans-serif",background:"#04080e",minHeight:"100vh",color:"#f1f5f9",padding:"12px 12px 60px"};
 
   return (
+    <GC.Provider value={gCtx}>
     <div style={appStyle}>
       <GlobalDefs/>
 
@@ -1431,7 +1733,7 @@ export default function App() {
           <p style={{margin:0,fontSize:10,color:"#475569"}}>放課後等デイサービス ／ 児童発達支援</p>
         </div>
         <div style={{display:"flex",gap:0,background:"#0f172a",border:"1px solid #1e293b",borderRadius:8,overflow:"hidden"}}>
-          {[{k:"daily",lbl:"📅 日々の管理"},{k:"defaults",lbl:"⚙ デフォルト"}].map((item)=>(
+          {[{k:"daily",lbl:"📅 日々の管理"},{k:"defaults",lbl:"⚙ デフォルト"},{k:"categories",lbl:"🏷 区分管理"}].map((item)=>(
             <button key={item.k} onClick={()=>setScreen(item.k)} style={{background:screen===item.k?"#2563eb":"transparent",color:screen===item.k?"#fff":"#64748b",border:"none",padding:"7px 16px",fontSize:11,fontWeight:700,cursor:"pointer",transition:"all 0.15s"}}>{item.lbl}</button>
           ))}
         </div>
@@ -1468,7 +1770,6 @@ export default function App() {
               </select>
             </div>
             <button onClick={copyFromPrev} style={BS("#1e293b","#64748b")}>← 前日コピー</button>
-            <button onClick={saveAsDefault} style={{...BS("#062a18","#34d399"),border:"1px solid #14532d"}}>★ デフォルト登録</button>
             <div style={{marginLeft:"auto",display:"flex",gap:5}}>
               <button onClick={()=>dlCSV(buildScheduleCSV(staff,children,date),"配置_"+date+".csv")} style={BS("#1e293b","#94a3b8")}>⬇ CSV</button>
               <button onClick={()=>setModal("help")} style={BS("#1e293b","#475569")}>？</button>
@@ -1492,19 +1793,16 @@ export default function App() {
           </div>
 
           
-          <div style={{overflowX:"auto",overflowY:"hidden",border:"1px solid #1e293b",borderRadius:10,background:"#070d18",height:TOTAL_H+HDR_H+2}}>
-            <div style={{display:"flex",minWidth:"max-content"}}>
+          <div style={{overflowX:"auto",overflowY:"hidden",border:"1px solid #1e293b",borderRadius:10,background:"#070d18",height:TOTAL_H+HDR_H+4}}>
+            <div style={{display:"flex",minWidth:"max-content",alignItems:"flex-start"}}>
 
               
-              <div style={{flexShrink:0,width:TW,position:"sticky",left:0,zIndex:30,background:"#04080e",borderRight:"2px solid #334155"}}>
-                
+              <div style={{flexShrink:0,width:TW,height:HDR_H+TOTAL_H,position:"sticky",left:0,zIndex:30,background:"#04080e",borderRight:"2px solid #334155"}}>
                 <div style={{height:HDR_H,borderBottom:"2px solid #334155",display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:"#475569",fontWeight:700}}>時間</div>
-                
                 <div style={{height:TOTAL_H,position:"relative"}}>
                   {timeLabels.map(h=>(
                     <div key={h} style={{position:"absolute",top:tY(h)-1,right:4,fontSize:12,color:"#94a3b8",fontWeight:700,lineHeight:1}}>{h}:00</div>
                   ))}
-                  
                   {Array.from({length:H_TOTAL*2},(_,i)=>{
                     if(i%2===0)return null;
                     return <div key={i} style={{position:"absolute",top:i*CH/2,right:4,fontSize:9,color:"#475569",lineHeight:1}}>{toHM(H_START+i*0.5)}</div>;
@@ -1513,7 +1811,7 @@ export default function App() {
               </div>
 
               
-              <div style={{flexShrink:0,width:chartColW,position:"sticky",left:TW,zIndex:29,background:"#060c18",borderRight:"2px solid #334155"}}>
+              <div style={{flexShrink:0,width:chartColW,height:HDR_H+TOTAL_H,position:"sticky",left:TW,zIndex:29,background:"#060c18",borderRight:"2px solid #334155"}}>
                 <div style={{height:HDR_H,borderBottom:"2px solid #334155",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:1}}>
                   <div style={{fontSize:8,color:"#475569",fontWeight:700}}>人員</div>
                   <div style={{fontSize:7,color:"#334155"}}>青=児 緑/赤=職</div>
@@ -1525,9 +1823,9 @@ export default function App() {
 
               
               {showStaff&&(
-                <div style={{flexShrink:0,display:"flex",flexDirection:"column",borderRight:"3px solid #1e3a5f"}}>
+                <div style={{flexShrink:0,display:"flex",flexDirection:"column",height:HDR_H+TOTAL_H,borderRight:"3px solid #1e3a5f"}}>
                   
-                  <div style={{height:HDR_H,display:"flex",borderBottom:"2px solid #334155",background:"#06101e",position:"sticky",top:0,zIndex:20,alignItems:"stretch"}}>
+                  <div style={{height:HDR_H,display:"flex",borderBottom:"2px solid #334155",background:"#06101e",alignItems:"stretch"}}>
                     {staff.map((s,si)=>{
                       const st=STAFF_TYPES[s.stype]||STAFF_TYPES.fulltime;
                       const isDragTarget = dragOver!==null&&dragOver.id===s.id&&dragOver.isStaff===true;
@@ -1566,7 +1864,7 @@ export default function App() {
                     })}
                   </div>
                   
-                  <div style={{height:TOTAL_H,display:"flex",position:"relative"}}>
+                  <div style={{height:TOTAL_H,display:"flex",position:"relative",overflow:"hidden"}}>
                     <RouteOverlay staff={staff} colMeta={staffColMeta}/>
                     {staff.map(s=>(
                       <div key={s.id} style={{width:cwS,flexShrink:0,position:"relative"}}>
@@ -1582,13 +1880,13 @@ export default function App() {
               )}
 
               
-              {showChild&&Object.keys(SCHOOL_GROUPS).map((sk)=>{ var sg=SCHOOL_GROUPS[sk];
+              {showChild&&Object.keys(schoolGroups).map((sk)=>{ var sg=schoolGroups[sk];
                 const group=groupedChildren[sk];
                 if(!group||!group.length)return null;
                 return (
-                  <div key={sk} style={{flexShrink:0,display:"flex",flexDirection:"column",borderRight:"3px solid "+sg.color+"55"}}>
+                  <div key={sk} style={{flexShrink:0,display:"flex",flexDirection:"column",height:HDR_H+TOTAL_H,borderRight:"3px solid "+sg.color+"55"}}>
                     
-                    <div style={{height:HDR_H,display:"flex",borderBottom:"2px solid #334155",background:"#04080e",position:"sticky",top:0,zIndex:20,alignItems:"stretch"}}>
+                    <div style={{height:HDR_H,display:"flex",borderBottom:"2px solid #334155",background:"#04080e",alignItems:"stretch"}}>
                       {group.map((c,ci)=>{
                         const globalIdx = children.findIndex(x=>x.id===c.id);
                         const isDragTarget = dragOver!==null&&dragOver.id===c.id&&dragOver.isStaff===false;
@@ -1628,7 +1926,7 @@ export default function App() {
                       })}
                     </div>
                     
-                    <div style={{height:TOTAL_H,display:"flex",position:"relative"}}>
+                    <div style={{height:TOTAL_H,display:"flex",position:"relative",overflow:"hidden"}}>
                       {group.map(c=>(
                         <div key={c.id} style={{width:cwC,flexShrink:0,position:"relative"}}>
                           <ChildCol person={c} colW={cwC}
@@ -1636,7 +1934,8 @@ export default function App() {
                             onDelete={sid=>delSeg(c.id,sid,false)}
                             onAdd={seg=>addSeg(c.id,seg,false)}
                             onPickupChange={t=>changePickup(c.id,t)}
-                            hoverT={hoverT}/>
+                            hoverT={hoverT}
+                            schoolGroups={schoolGroups}/>
                         </div>
                       ))}
                     </div>
@@ -1656,7 +1955,7 @@ export default function App() {
               </div>
             );})}
             <span style={{color:"#334155",fontSize:9}}>|</span>
-            {Object.keys(SCHOOL_GROUPS).map((k)=>{ var v=SCHOOL_GROUPS[k]; return (
+            {Object.keys(schoolGroups).map((k)=>{ var v=schoolGroups[k]; return (
               <div key={k} style={{display:"flex",alignItems:"center",gap:3,fontSize:9.5}}>
                 <div style={{width:6,height:6,borderRadius:"50%",background:v.color}}/>
                 <span style={{color:"#64748b"}}>{v.label}</span>
@@ -1669,12 +1968,17 @@ export default function App() {
                 <span style={{color:"#475569"}}>ルート{ROUTE_NUMS[i]}</span>
               </div>
             ))}
-            <span style={{fontSize:9,color:"#334155",marginLeft:4}}>クリック=追加(1h) ／ <span style={{color:"#f59e0b"}}>Shift+ドラッグ=送迎</span> ／ <span style={{color:"#8b9cb8"}}>Ctrl+ドラッグ=休憩</span> ／ 送迎クリック=ルート番号切替 ／ 📌ドラッグ=お迎え時刻変更</span>
+            <span style={{fontSize:9,color:"#334155",marginLeft:4}}>クリック=追加(1h) ／ <span style={{color:"#f59e0b"}}>Shift+ドラッグ=送迎</span> ／ <span style={{color:"#8b9cb8"}}>Ctrl/Alt+ドラッグ=休憩(職員)</span> ／ <span style={{color:"#fbbf24"}}>Alt+クリック=お迎えピン(児童)</span> ／ 📌×=ピン削除</span>
           </div>
         </>
       )}
 
       
+      {screen==="categories"&&(
+        <CategoriesScreen
+          staffTypes={staffTypes} setStaffTypes={setStaffTypes}
+          schoolGroups={schoolGroups} setSchoolGroups={setSchoolGroups}/>
+      )}
       {screen==="defaults"&&(
         <DefaultsScreen staff={master.staff} children={master.children}
           master={master} defaults={defaults} setDefaults={setDefaults}
@@ -1682,7 +1986,9 @@ export default function App() {
           onImportClick={()=>{setImportTxt("");setImportErr("");setModal("importDef");}}
           onAddStaff={()=>setModal("newStaff")}
           onAddChild={()=>setModal("newChild")}
-          onDelMaster={(id,kind)=>delFromMaster(id,kind)}/>
+          onDelMaster={(id,kind)=>delFromMaster(id,kind)}
+          onRename={(id,kind,name,subtype)=>renameMaster(id,kind,name,subtype)}
+          onCopy={(id,kind)=>copyMaster(id,kind)}/>
       )}
 
       
@@ -1707,7 +2013,7 @@ export default function App() {
                 </p>
                 <div style={{display:"flex",flexDirection:"column",gap:5,marginBottom:14,maxHeight:280,overflowY:"auto"}}>
                   {available.map(m=>{
-                    const col = isStaff ? ((STAFF_TYPES[m.stype]&&STAFF_TYPES[m.stype].color)||"#3b82f6") : ((SCHOOL_GROUPS[m.school]&&SCHOOL_GROUPS[m.school].color)||"#64748b");
+                    const col = isStaff ? ((STAFF_TYPES[m.stype]&&STAFF_TYPES[m.stype].color)||"#3b82f6") : ((schoolGroups[m.school]&&schoolGroups[m.school].color)||"#64748b");
                     const def = (defaults[m.id]&&defaults[m.id][dow]);
                     const defLabel = isStaff
                       ? (def&&def.active&&def&&def.workStart ? def.workStart+"〜"+def.workEnd : "デフォルトなし")
@@ -1721,7 +2027,7 @@ export default function App() {
                         <div style={{flex:1}}>
                           <div style={{fontSize:13,fontWeight:800,color:"#f1f5f9"}}>{m.name}</div>
                           <div style={{fontSize:10,color:"#475569",marginTop:1}}>
-                            {isStaff ? (STAFF_TYPES[m.stype]&&STAFF_TYPES[m.stype].label) : (SCHOOL_GROUPS[m.school]&&SCHOOL_GROUPS[m.school].label)}
+                            {isStaff ? (STAFF_TYPES[m.stype]&&STAFF_TYPES[m.stype].label) : (schoolGroups[m.school]&&schoolGroups[m.school].label)}
                             <span style={{marginLeft:8,color:def&&def.active?"#10b981":"#475569"}}>{defLabel}</span>
                           </div>
                         </div>
@@ -1757,10 +2063,18 @@ export default function App() {
             </FF>
             {isStaff
               ? <FF label="分類"><select value={newMember.stype} onChange={e=>setNewMember(p=>({...p,stype:e.target.value}))} style={IS}>{Object.keys(STAFF_TYPES).map((k)=><option key={k} value={k}>{STAFF_TYPES[k].label}</option>)}</select></FF>
-              : <FF label="学校・園"><select value={newMember.school} onChange={e=>setNewMember(p=>({...p,school:e.target.value}))} style={IS}>{Object.keys(SCHOOL_GROUPS).map((k)=><option key={k} value={k}>{SCHOOL_GROUPS[k].label}</option>)}</select></FF>
+              : <FF label="学校・園"><select value={newMember.school} onChange={e=>setNewMember(p=>({...p,school:e.target.value}))} style={IS}>{Object.keys(schoolGroups).map((k)=><option key={k} value={k}>{schoolGroups[k].label}</option>)}</select></FF>
             }
+            <FF label="デフォルトをコピー（任意）">
+              <select value={newMember.copyFromId} onChange={e=>setNewMember(p=>({...p,copyFromId:e.target.value}))} style={IS}>
+                <option value="">コピーしない</option>
+                {(isStaff ? master.staff : master.children).map(m=>(
+                  <option key={m.id} value={m.id}>{m.name}</option>
+                ))}
+              </select>
+            </FF>
             <p style={{fontSize:10,color:"#475569",margin:"8px 0 0"}}>
-              登録後、マスター一覧に追加されます。デフォルト時間は「⚙ デフォルト」から設定してください。
+              登録後、マスター一覧に追加されます。
             </p>
             <div style={{display:"flex",gap:7,justifyContent:"flex-end",marginTop:16}}>
               <button onClick={()=>setModal(isStaff?"addStaff":"addChild")} style={BS("#1e293b","#64748b")}>← 戻る</button>
@@ -1812,7 +2126,6 @@ export default function App() {
             ["送迎・休憩バー上下端ドラッグ","開始・終了時刻を変更（15分単位）"],
             ["送迎バーのクリック","ルート番号を①→②→…→⑧と切り替え"],
             ["📌ピンドラッグ（児童）","お迎え時刻の縦線を上下にドラッグして変更"],
-            ["★ デフォルト登録","その日のスケジュールを曜日デフォルトとして保存"],
           ].map((item)=>(
             <div key={item[0]} style={{marginBottom:8}}>
               <div style={{fontSize:11.5,fontWeight:700,color:"#60a5fa"}}>{item[0]}</div>
@@ -1826,13 +2139,20 @@ export default function App() {
       
       {toast&&<div style={{position:"fixed",bottom:20,left:"50%",transform:"translateX(-50%)",background:"#14532d",border:"1px solid #166534",borderRadius:8,padding:"9px 18px",fontSize:12,fontWeight:700,color:"#86efac",zIndex:500,boxShadow:"0 4px 20px rgba(0,0,0,0.6)",pointerEvents:"none"}}>{toast}</div>}
     </div>
+    </GC.Provider>
   );
 }
 
-// ─── 小コンポーネント / スタイルヘルパー ─────────────────────
-function TI({val,dis,on}){return <input type="time" value={val||""} disabled={dis} onChange={e=>on(e.target.value)} style={{background:dis?"#0c1220":"#1e293b",border:"1px solid "+(dis?"#1e293b":"#334155"),borderRadius:5,color:dis?"#334155":"#f1f5f9",padding:"4px 6px",fontSize:11,width:82,cursor:dis?"not-allowed":"text"}}/>;}
+function TI({val,dis,on}){return <input type="time" value={val||""} disabled={dis} onChange={e=>on(e.target.value)} style={{background:"#0f172a",border:"1px solid #334155",borderRadius:4,color:"#e2e8f0",padding:"3px 6px",fontSize:12,width:90}}/>;}
+function FF({label,children}){return <div style={{marginBottom:10}}><div style={{fontSize:10,color:"#64748b",marginBottom:3,fontWeight:600}}>{label}</div>{children}</div>;}
+const IS={background:"#0f172a",border:"1px solid #334155",borderRadius:4,color:"#e2e8f0",padding:"4px 6px",fontSize:12,width:"100%"};
+const MH3={margin:"0 0 12px",fontSize:13,fontWeight:800,color:"#60a5fa"};
+
 function Modal({children,onClose,wide}){return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.78)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:300}} onClick={onClose}><div style={{background:"#0f172a",border:"1px solid #334155",borderRadius:12,padding:22,width:wide?440:320,maxHeight:"88vh",overflowY:"auto"}} onClick={e=>e.stopPropagation()}>{children}</div></div>;}
-function FF({label,children}){return <div style={{marginBottom:11}}><label style={{display:"block",fontSize:11,color:"#64748b",fontWeight:600,marginBottom:3}}>{label}</label>{children}</div>;}
-const BS=(bg,c)=>({background:bg,color:c,border:"none",borderRadius:6,padding:"5px 11px",fontSize:11,fontWeight:700,cursor:"pointer"});
-const MH3={margin:"0 0 13px",fontSize:14,fontWeight:800};
-const IS={width:"100%",background:"#1e293b",border:"1px solid #334155",borderRadius:6,color:"#f1f5f9",padding:"6px 9px",fontSize:13,boxSizing:"border-box"};
+
+export default function App() {
+  const [ready, setReady] = useState(false);
+  useEffect(()=>{ initS().then(()=>setReady(true)); }, []);
+  if(!ready) return (
+    <div style={{fontFamily:"Noto Sans JP,sans-serif",background:"#04080e",minHeight:"100vh",
+      d
