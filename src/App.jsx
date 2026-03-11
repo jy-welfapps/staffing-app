@@ -1,5 +1,5 @@
 // ============================================================
-//  児童・職員スケジュール管理 v8.0.7
+//  児童・職員スケジュール管理 v8.0.8
 //  縦軸 = 時間(8:00〜19:00)、横軸 = 人員
 //  職員: 在所(下地)+送迎(斜線オーバーレイ, ルート番号)+休憩(ドット)
 //  児童: 在所バー+お迎えピン📌、学校グループ別列
@@ -1423,6 +1423,8 @@ function dlCSV(content,fn){const a=document.createElement("a");a.href=URL.create
 // ─── メインアプリ ────────────────────────────────────────────
 function AppInner() {
   const todayStr = new Date().toISOString().slice(0,10);
+  const hdrScrollRef = useRef(null);
+  const bodyScrollRef = useRef(null);
   const [hStart, setHStart] = useState(8);
   const [hEnd,   setHEnd]   = useState(19);
   const [winH,   setWinH]   = useState(window.innerHeight);
@@ -1793,57 +1795,46 @@ function AppInner() {
           </div>
 
           
-          <div style={{overflowX:"auto",overflowY:"hidden",border:"1px solid #1e293b",borderRadius:10,background:"#070d18",height:TOTAL_H+HDR_H+4}}>
-            <div style={{display:"flex",minWidth:"max-content",alignItems:"flex-start"}}>
+          <div style={{border:"1px solid #1e293b",borderRadius:10,background:"#070d18",overflow:"hidden"}}>
+            {(()=>{
+              /* ヘッダーとボディを分離してスクロール同期 */
+              const onHdrScroll = e => { if(bodyScrollRef.current) bodyScrollRef.current.scrollLeft = e.currentTarget.scrollLeft; };
+              const onBodyScroll = e => { if(hdrScrollRef.current) hdrScrollRef.current.scrollLeft = e.currentTarget.scrollLeft; };
 
-              
-              <div style={{flexShrink:0,width:TW,height:HDR_H+TOTAL_H,position:"sticky",left:0,zIndex:30,background:"#04080e",borderRight:"2px solid #334155"}}>
-                <div style={{height:HDR_H,borderBottom:"2px solid #334155",display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:"#475569",fontWeight:700}}>時間</div>
-                <div style={{height:TOTAL_H,position:"relative"}}>
-                  {timeLabels.map(h=>(
-                    <div key={h} style={{position:"absolute",top:tY(h)-1,right:4,fontSize:12,color:"#94a3b8",fontWeight:700,lineHeight:1}}>{h}:00</div>
-                  ))}
-                  {Array.from({length:H_TOTAL*2},(_,i)=>{
-                    if(i%2===0)return null;
-                    return <div key={i} style={{position:"absolute",top:i*CH/2,right:4,fontSize:9,color:"#475569",lineHeight:1}}>{toHM(H_START+i*0.5)}</div>;
-                  })}
-                </div>
-              </div>
-
-              
-              <div style={{flexShrink:0,width:chartColW,height:HDR_H+TOTAL_H,position:"sticky",left:TW,zIndex:29,background:"#060c18",borderRight:"2px solid #334155"}}>
-                <div style={{height:HDR_H,borderBottom:"2px solid #334155",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:1}}>
-                  <div style={{fontSize:8,color:"#475569",fontWeight:700}}>人員</div>
-                  <div style={{fontSize:7,color:"#334155"}}>青=児 緑/赤=職</div>
-                </div>
-                <div style={{height:TOTAL_H,position:"relative"}}>
-                  <StaffingBar staff={staff} children={children} hoverT={hoverT} onHover={setHoverT} colW={chartColW}/>
-                </div>
-              </div>
-
-              
-              {showStaff&&(
-                <div style={{flexShrink:0,display:"flex",flexDirection:"column",height:HDR_H+TOTAL_H,borderRight:"3px solid #1e3a5f"}}>
-                  
-                  <div style={{height:HDR_H,display:"flex",borderBottom:"2px solid #334155",background:"#06101e",alignItems:"stretch"}}>
-                    {staff.map((s,si)=>{
+              /* ── ヘッダー行 ── */
+              const hdrRow = (
+                <div ref={hdrScrollRef} onScroll={onHdrScroll}
+                  style={{overflowX:"auto",overflowY:"hidden",height:HDR_H,
+                    scrollbarWidth:"none",msOverflowStyle:"none"}}>
+                  <style>{".no-sb::-webkit-scrollbar{display:none}"}</style>
+                  <div className="no-sb" style={{display:"flex",minWidth:"max-content",height:HDR_H}}>
+                    {/* 時間軸ヘッダー */}
+                    <div style={{flexShrink:0,width:TW,height:HDR_H,position:"sticky",left:0,zIndex:30,
+                      background:"#04080e",borderRight:"2px solid #334155",borderBottom:"2px solid #334155",
+                      display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:"#475569",fontWeight:700}}>時間</div>
+                    {/* 人員ヘッダー */}
+                    <div style={{flexShrink:0,width:chartColW,height:HDR_H,position:"sticky",left:TW,zIndex:29,
+                      background:"#060c18",borderRight:"2px solid #334155",borderBottom:"2px solid #334155",
+                      display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:1}}>
+                      <div style={{fontSize:8,color:"#475569",fontWeight:700}}>人員</div>
+                      <div style={{fontSize:7,color:"#334155"}}>青=児 緑/赤=職</div>
+                    </div>
+                    {/* 職員ヘッダー */}
+                    {showStaff&&staff.map((s,si)=>{
                       const st=STAFF_TYPES[s.stype]||STAFF_TYPES.fulltime;
-                      const isDragTarget = dragOver!==null&&dragOver.id===s.id&&dragOver.isStaff===true;
                       return (
-                        <div key={s.id}
-                          draggable={true}
+                        <div key={s.id} draggable={true}
                           onDragStart={e=>{e.dataTransfer.setData("id",s.id);e.dataTransfer.setData("isStaff","1");}}
                           onDragOver={e=>{e.preventDefault();setDragOver({id:s.id,isStaff:true});}}
                           onDragLeave={()=>setDragOver(null)}
                           onDrop={e=>{e.preventDefault();setDragOver(null);const fromId=e.dataTransfer.getData("id");reorderPerson(fromId,true,si);}}
-                          style={{width:cwS,flexShrink:0,borderRight:"1px solid #334155",padding:compact?"3px 2px":"4px 4px 4px 6px",display:"flex",flexDirection:"column",justifyContent:"space-between",gap:2,overflow:"hidden",cursor:"grab"}}>
+                          style={{width:cwS,flexShrink:0,height:HDR_H,borderRight:"1px solid #334155",borderBottom:"2px solid #334155",
+                            padding:compact?"3px 2px":"4px 4px 4px 6px",display:"flex",flexDirection:"column",
+                            justifyContent:"space-between",gap:2,overflow:"hidden",cursor:"grab",background:"#06101e",boxSizing:"border-box"}}>
                           {compact ? (
-                            <div style={{display:"flex",flexDirection:"row",alignItems:"stretch",height:"100%",width:"100%",overflow:"hidden"}}>
-                              <div style={{writingMode:"vertical-rl",textOrientation:"mixed",fontSize:10,fontWeight:800,color:"#f1f5f9",lineHeight:1.2,flex:1,overflow:"hidden"}}>{s.name}</div>
-                              {(()=>{
-                                const ws=s.segments.find(sg=>sg.type==="work");
-                                return ws ? <div style={{writingMode:"vertical-rl",textOrientation:"mixed",fontSize:8,color:"#60a5fa",fontWeight:700,lineHeight:1.2,flexShrink:0}}>{toHM(ws.start)}〜{toHM(ws.end)}</div> : null;
-                              })()}
+                            <div style={{display:"flex",flexDirection:"row",alignItems:"stretch",height:"100%",overflow:"hidden"}}>
+                              <div style={{writingMode:"vertical-rl",fontSize:10,fontWeight:800,color:"#f1f5f9",lineHeight:1.2,flex:1,overflow:"hidden"}}>{s.name}</div>
+                              {(()=>{const ws=s.segments.find(sg=>sg.type==="work");return ws?<div style={{writingMode:"vertical-rl",fontSize:8,color:"#60a5fa",fontWeight:700,lineHeight:1.2,flexShrink:0}}>{toHM(ws.start)}〜{toHM(ws.end)}</div>:null;})()}
                             </div>
                           ) : (
                             <>
@@ -1862,88 +1853,111 @@ function AppInner() {
                         </div>
                       );
                     })}
-                  </div>
-                  
-                  <div style={{height:TOTAL_H,display:"flex",position:"relative",overflow:"hidden"}}>
-                    <RouteOverlay staff={staff} colMeta={staffColMeta}/>
-                    {staff.map(s=>(
-                      <div key={s.id} style={{width:cwS,flexShrink:0,position:"relative"}}>
-                        <StaffCol person={s} colW={cwS}
-                          onUpdate={seg=>updSeg(s.id,seg,true)}
-                          onDelete={sid=>delSeg(s.id,sid,true)}
-                          onAdd={seg=>addSeg(s.id,seg,true)}
-                          hoverT={hoverT}/>
-                      </div>
-                    ))}
+                    {/* 児童ヘッダー */}
+                    {showChild&&Object.keys(schoolGroups).map(sk=>{
+                      const sg=schoolGroups[sk];
+                      const group=groupedChildren[sk];
+                      if(!group||!group.length) return null;
+                      return group.map((c,ci)=>{
+                        const globalIdx=children.findIndex(x=>x.id===c.id);
+                        return (
+                          <div key={c.id} draggable={true}
+                            onDragStart={e=>{e.dataTransfer.setData("id",c.id);e.dataTransfer.setData("isStaff","0");}}
+                            onDragOver={e=>{e.preventDefault();setDragOver({id:c.id,isStaff:false});}}
+                            onDragLeave={()=>setDragOver(null)}
+                            onDrop={e=>{e.preventDefault();setDragOver(null);const fromId=e.dataTransfer.getData("id");reorderPerson(fromId,false,globalIdx);}}
+                            style={{width:cwC,flexShrink:0,height:HDR_H,borderRight:"1px solid #1e3a5f",borderBottom:"2px solid #334155",
+                              padding:compact?"3px 2px":"4px 3px 3px 4px",display:"flex",flexDirection:"column",
+                              justifyContent:"space-between",overflow:"hidden",cursor:"grab",background:"#04080e",boxSizing:"border-box"}}>
+                            {compact ? (
+                              <div style={{display:"flex",flexDirection:"row",alignItems:"stretch",height:"100%",overflow:"hidden"}}>
+                                <div style={{writingMode:"vertical-rl",fontSize:10,fontWeight:800,color:"#e2e8f0",lineHeight:1.2,flex:1,overflow:"hidden"}}>{c.name}</div>
+                                {(()=>{const ws=c.segments.find(sg=>sg.type==="work");const pt=c.pickupTime!=null?toHM(c.pickupTime):null;const ts=(ws?toHM(ws.start)+"〜"+toHM(ws.end):"")+(ws&&pt?" ":"")+(pt?"📌"+pt:"");return ts?<div style={{writingMode:"vertical-rl",fontSize:8,color:sg.color,fontWeight:700,lineHeight:1.2,flexShrink:0}}>{ts}</div>:null;})()}
+                              </div>
+                            ) : (
+                              <>
+                                <div style={{fontSize:12,fontWeight:800,color:"#e2e8f0",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.name}</div>
+                                <div style={{display:"flex",alignItems:"center",gap:2}}>
+                                  <div style={{width:5,height:5,borderRadius:"50%",background:sg.color}}/>
+                                  <span style={{fontSize:7.5,color:sg.color,fontWeight:600}}>{sg.label}</span>
+                                </div>
+                                {c.pickupTime!=null&&<div style={{fontSize:7.5,color:"#fbbf24"}}>📌{toHM(c.pickupTime)}</div>}
+                                <button onClick={()=>delPerson(c.id)} style={{fontSize:7.5,background:"transparent",border:"none",color:"#334155",cursor:"pointer",padding:0,textAlign:"left"}}
+                                  onMouseEnter={e=>{e.currentTarget.style.color="#ef4444";}}
+                                  onMouseLeave={e=>{e.currentTarget.style.color="#334155";}}>🗑</button>
+                              </>
+                            )}
+                          </div>
+                        );
+                      });
+                    })}
                   </div>
                 </div>
-              )}
+              );
 
-              
-              {showChild&&Object.keys(schoolGroups).map((sk)=>{ var sg=schoolGroups[sk];
-                const group=groupedChildren[sk];
-                if(!group||!group.length)return null;
-                return (
-                  <div key={sk} style={{flexShrink:0,display:"flex",flexDirection:"column",height:HDR_H+TOTAL_H,borderRight:"3px solid "+sg.color+"55"}}>
-                    
-                    <div style={{height:HDR_H,display:"flex",borderBottom:"2px solid #334155",background:"#04080e",alignItems:"stretch"}}>
-                      {group.map((c,ci)=>{
-                        const globalIdx = children.findIndex(x=>x.id===c.id);
-                        const isDragTarget = dragOver!==null&&dragOver.id===c.id&&dragOver.isStaff===false;
-                        return (
-                        <div key={c.id}
-                          draggable={true}
-                          onDragStart={e=>{e.dataTransfer.setData("id",c.id);e.dataTransfer.setData("isStaff","0");}}
-                          onDragOver={e=>{e.preventDefault();setDragOver({id:c.id,isStaff:false});}}
-                          onDragLeave={()=>setDragOver(null)}
-                          onDrop={e=>{e.preventDefault();setDragOver(null);const fromId=e.dataTransfer.getData("id");reorderPerson(fromId,false,globalIdx);}}
-                          style={{width:cwC,flexShrink:0,borderRight:"1px solid #1e3a5f",padding:compact?"3px 2px":"4px 3px 3px 4px",display:"flex",flexDirection:"column",justifyContent:"space-between",overflow:"hidden",cursor:"grab"}}>
-                          {compact ? (
-                            <div style={{display:"flex",flexDirection:"row",alignItems:"stretch",height:"100%",width:"100%",overflow:"hidden"}}>
-                              <div style={{writingMode:"vertical-rl",textOrientation:"mixed",fontSize:10,fontWeight:800,color:"#e2e8f0",lineHeight:1.2,flex:1,overflow:"hidden"}}>{c.name}</div>
-                              {(()=>{
-                                const ws=c.segments.find(sg=>sg.type==="work");
-                                const pt=c.pickupTime!=null?toHM(c.pickupTime):null;
-                                const timeStr=(ws?toHM(ws.start)+"〜"+toHM(ws.end):"")+(ws&&pt?" ":"")+( pt?"📌"+pt:"");
-                                return timeStr ? <div style={{writingMode:"vertical-rl",textOrientation:"mixed",fontSize:8,color:sg.color,fontWeight:700,lineHeight:1.2,flexShrink:0}}>{timeStr}</div> : null;
-                              })()}
+              /* ── ボディ行 ── */
+              const bodyRow = (
+                <div ref={bodyScrollRef} onScroll={onBodyScroll}
+                  style={{overflowX:"auto",overflowY:"hidden",height:TOTAL_H}}>
+                  <div style={{display:"flex",minWidth:"max-content",height:TOTAL_H}}>
+                    {/* 時間軸ボディ */}
+                    <div style={{flexShrink:0,width:TW,height:TOTAL_H,position:"sticky",left:0,zIndex:30,background:"#04080e",borderRight:"2px solid #334155"}}>
+                      <div style={{height:TOTAL_H,position:"relative"}}>
+                        {timeLabels.map(h=>(
+                          <div key={h} style={{position:"absolute",top:tY(h)-1,right:4,fontSize:12,color:"#94a3b8",fontWeight:700,lineHeight:1}}>{h}:00</div>
+                        ))}
+                        {Array.from({length:H_TOTAL*2},(_,i)=>{
+                          if(i%2===0)return null;
+                          return <div key={i} style={{position:"absolute",top:i*CH/2,right:4,fontSize:9,color:"#475569",lineHeight:1}}>{toHM(H_START+i*0.5)}</div>;
+                        })}
+                      </div>
+                    </div>
+                    {/* 人員チェックボディ */}
+                    <div style={{flexShrink:0,width:chartColW,height:TOTAL_H,position:"sticky",left:TW,zIndex:29,background:"#060c18",borderRight:"2px solid #334155"}}>
+                      <StaffingBar staff={staff} children={children} hoverT={hoverT} onHover={setHoverT} colW={chartColW}/>
+                    </div>
+                    {/* 職員ボディ */}
+                    {showStaff&&(
+                      <div style={{flexShrink:0,display:"flex",height:TOTAL_H,position:"relative",borderRight:"3px solid #1e3a5f"}}>
+                        <RouteOverlay staff={staff} colMeta={staffColMeta}/>
+                        {staff.map(s=>(
+                          <div key={s.id} style={{width:cwS,flexShrink:0,position:"relative"}}>
+                            <StaffCol person={s} colW={cwS}
+                              onUpdate={seg=>updSeg(s.id,seg,true)}
+                              onDelete={sid=>delSeg(s.id,sid,true)}
+                              onAdd={seg=>addSeg(s.id,seg,true)}
+                              hoverT={hoverT}/>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {/* 児童ボディ */}
+                    {showChild&&Object.keys(schoolGroups).map(sk=>{
+                      const sg=schoolGroups[sk];
+                      const group=groupedChildren[sk];
+                      if(!group||!group.length) return null;
+                      return (
+                        <div key={sk} style={{flexShrink:0,display:"flex",height:TOTAL_H,borderRight:"3px solid "+sg.color+"55"}}>
+                          {group.map(c=>(
+                            <div key={c.id} style={{width:cwC,flexShrink:0,position:"relative"}}>
+                              <ChildCol person={c} colW={cwC}
+                                onUpdate={seg=>updSeg(c.id,seg,false)}
+                                onDelete={sid=>delSeg(c.id,sid,false)}
+                                onAdd={seg=>addSeg(c.id,seg,false)}
+                                onPickupChange={t=>changePickup(c.id,t)}
+                                hoverT={hoverT}
+                                schoolGroups={schoolGroups}/>
                             </div>
-                          ) : (
-                            <>
-                              <div style={{fontSize:12,fontWeight:800,color:"#e2e8f0",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.name}</div>
-                              <div style={{display:"flex",alignItems:"center",gap:2}}>
-                                <div style={{width:5,height:5,borderRadius:"50%",background:sg.color}}/>
-                                <span style={{fontSize:7.5,color:sg.color,fontWeight:600}}>{sg.label}</span>
-                              </div>
-                              {c.pickupTime!=null&&<div style={{fontSize:7.5,color:"#fbbf24"}}>📌{toHM(c.pickupTime)}</div>}
-                              <button onClick={()=>delPerson(c.id)} style={{fontSize:7.5,background:"transparent",border:"none",color:"#334155",cursor:"pointer",padding:0,textAlign:"left"}}
-                                onMouseEnter={e=>{e.currentTarget.style.color="#ef4444";}}
-                                onMouseLeave={e=>{e.currentTarget.style.color="#334155";}}>🗑</button>
-                            </>
-                          )}
+                          ))}
                         </div>
-                        );
-                      })}
-                    </div>
-                    
-                    <div style={{height:TOTAL_H,display:"flex",position:"relative",overflow:"hidden"}}>
-                      {group.map(c=>(
-                        <div key={c.id} style={{width:cwC,flexShrink:0,position:"relative"}}>
-                          <ChildCol person={c} colW={cwC}
-                            onUpdate={seg=>updSeg(c.id,seg,false)}
-                            onDelete={sid=>delSeg(c.id,sid,false)}
-                            onAdd={seg=>addSeg(c.id,seg,false)}
-                            onPickupChange={t=>changePickup(c.id,t)}
-                            hoverT={hoverT}
-                            schoolGroups={schoolGroups}/>
-                        </div>
-                      ))}
-                    </div>
+                      );
+                    })}
                   </div>
-                );
-              })}
+                </div>
+              );
 
-            </div>
+              return <>{hdrRow}{bodyRow}</>;
+            })()}
           </div>
 
           
@@ -2143,16 +2157,4 @@ function AppInner() {
   );
 }
 
-function TI({val,dis,on}){return <input type="time" value={val||""} disabled={dis} onChange={e=>on(e.target.value)} style={{background:"#0f172a",border:"1px solid #334155",borderRadius:4,color:"#e2e8f0",padding:"3px 6px",fontSize:12,width:90}}/>;}
-function FF({label,children}){return <div style={{marginBottom:10}}><div style={{fontSize:10,color:"#64748b",marginBottom:3,fontWeight:600}}>{label}</div>{children}</div>;}
-const IS={background:"#0f172a",border:"1px solid #334155",borderRadius:4,color:"#e2e8f0",padding:"4px 6px",fontSize:12,width:"100%"};
-const MH3={margin:"0 0 12px",fontSize:13,fontWeight:800,color:"#60a5fa"};
-
-function Modal({children,onClose,wide}){return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.78)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:300}} onClick={onClose}><div style={{background:"#0f172a",border:"1px solid #334155",borderRadius:12,padding:22,width:wide?440:320,maxHeight:"88vh",overflowY:"auto"}} onClick={e=>e.stopPropagation()}>{children}</div></div>;}
-
-export default function App() {
-  const [ready, setReady] = useState(false);
-  useEffect(()=>{ initS().then(()=>setReady(true)); }, []);
-  if(!ready) return (
-    <div style={{fontFamily:"Noto Sans JP,sans-serif",background:"#04080e",minHeight:"100vh",
-      d
+function TI({val,dis,on}){return <input type="time" value={val||""} disabled={dis} onChange={e=>on(e.target.value)} style={{background:"#0f172
