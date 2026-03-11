@@ -2157,4 +2157,21 @@ function AppInner() {
   );
 }
 
-function TI({val,dis,on}){return <input type="time" value={val||""} disabled={dis} onChange={e=>on(e.target.value)} style={{background:"#0f172
+function TI({val,dis,on}){return <input type="time" value={val||""} disabled={dis} onChange={e=>on(e.target.value)} style={{background:"#0f172a",border:"1px solid #334155",borderRadius:4,color:"#e2e8f0",padding:"3px 6px",fontSize:12,width:90}}/>;}
+function FF({label,children}){return <div style={{marginBottom:10}}><div style={{fontSize:10,color:"#64748b",marginBottom:3,fontWeight:600}}>{label}</div>{children}</div>;}
+const IS={background:"#0f172a",border:"1px solid #334155",borderRadius:4,color:"#e2e8f0",padding:"4px 6px",fontSize:12,width:"100%"};
+const MH3={margin:"0 0 12px",fontSize:13,fontWeight:800,color:"#60a5fa"};
+
+function Modal({children,onClose,wide}){return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.78)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:300}} onClick={onClose}><div style={{background:"#0f172a",border:"1px solid #334155",borderRadius:12,padding:22,width:wide?440:320,maxHeight:"88vh",overflowY:"auto"}} onClick={e=>e.stopPropagation()}>{children}</div></div>;}
+
+export default function App() {
+  const [ready, setReady] = useState(false);
+  useEffect(()=>{ initS().then(()=>setReady(true)); }, []);
+  if(!ready) return (
+    <div style={{fontFamily:"Noto Sans JP,sans-serif",background:"#04080e",minHeight:"100vh",
+      display:"flex",alignItems:"center",justifyContent:"center",color:"#60a5fa",fontSize:14}}>
+      読み込み中...
+    </div>
+  );
+  return <AppInner/>;
+}
