@@ -1,5 +1,5 @@
 // ============================================================
-//  児童・職員スケジュール管理 v8.0.8
+//  児童・職員スケジュール管理 v8.0.9
 //  縦軸 = 時間(8:00〜19:00)、横軸 = 人員
 //  職員: 在所(下地)+送迎(斜線オーバーレイ, ルート番号)+休憩(ドット)
 //  児童: 在所バー+お迎えピン📌、学校グループ別列
@@ -1820,7 +1820,9 @@ function AppInner() {
                       <div style={{fontSize:7,color:"#334155"}}>青=児 緑/赤=職</div>
                     </div>
                     {/* 職員ヘッダー */}
-                    {showStaff&&staff.map((s,si)=>{
+                    {showStaff&&(
+                    <div style={{display:"flex",borderRight:"3px solid #1e3a5f"}}>
+                    {staff.map((s,si)=>{
                       const st=STAFF_TYPES[s.stype]||STAFF_TYPES.fulltime;
                       return (
                         <div key={s.id} draggable={true}
@@ -1852,13 +1854,14 @@ function AppInner() {
                           )}
                         </div>
                       );
-                    })}
+                    })}</div>)}
                     {/* 児童ヘッダー */}
                     {showChild&&Object.keys(schoolGroups).map(sk=>{
                       const sg=schoolGroups[sk];
                       const group=groupedChildren[sk];
                       if(!group||!group.length) return null;
-                      return group.map((c,ci)=>{
+                      return (<div key={sk+"hdr"} style={{display:"flex",borderRight:"3px solid "+sg.color+"55"}}>
+                      {group.map((c,ci)=>{
                         const globalIdx=children.findIndex(x=>x.id===c.id);
                         return (
                           <div key={c.id} draggable={true}
@@ -1889,7 +1892,7 @@ function AppInner() {
                             )}
                           </div>
                         );
-                      });
+                      })}</div>);
                     })}
                   </div>
                 </div>
