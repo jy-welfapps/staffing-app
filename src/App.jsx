@@ -1,5 +1,5 @@
 // ============================================================
-//  児童・職員スケジュール管理 v8.0.9
+//  児童・職員スケジュール管理 v8.0.10
 //  縦軸 = 時間(8:00〜19:00)、横軸 = 人員
 //  職員: 在所(下地)+送迎(斜線オーバーレイ, ルート番号)+休憩(ドット)
 //  児童: 在所バー+お迎えピン📌、学校グループ別列
@@ -1425,8 +1425,8 @@ function AppInner() {
   const todayStr = new Date().toISOString().slice(0,10);
   const hdrScrollRef = useRef(null);
   const bodyScrollRef = useRef(null);
-  const [hStart, setHStart] = useState(8);
-  const [hEnd,   setHEnd]   = useState(19);
+  const [hStart, setHStart] = useState(()=>{ const s=loadS(); return s.hStart??8; });
+  const [hEnd,   setHEnd]   = useState(()=>{ const s=loadS(); return s.hEnd??19; });
   const [winH,   setWinH]   = useState(window.innerHeight);
   useEffect(()=>{
     const onResize = () => setWinH(window.innerHeight);
@@ -1761,12 +1761,12 @@ function AppInner() {
             </div>
             <div style={{display:"flex",alignItems:"center",gap:4,background:"#0f172a",border:"1px solid #1e293b",borderRadius:6,padding:"2px 8px"}}>
               <span style={{fontSize:10,color:"#475569",fontWeight:700}}>時間</span>
-              <select value={hStart} onChange={e=>setHStart(Number(e.target.value))}
+              <select value={hStart} onChange={e=>{const v=Number(e.target.value);setHStart(v);saveS({...loadS(),hStart:v});}}
                 style={{background:"transparent",border:"none",color:"#94a3b8",fontSize:11,cursor:"pointer"}}>
                 {Array.from({length:13},(_,i)=>i+6).map(h=><option key={h} value={h}>{h}:00</option>)}
               </select>
               <span style={{fontSize:10,color:"#475569"}}>〜</span>
-              <select value={hEnd} onChange={e=>setHEnd(Number(e.target.value))}
+              <select value={hEnd} onChange={e=>{const v=Number(e.target.value);setHEnd(v);saveS({...loadS(),hEnd:v});}}
                 style={{background:"transparent",border:"none",color:"#94a3b8",fontSize:11,cursor:"pointer"}}>
                 {Array.from({length:9},(_,i)=>i+16).map(h=><option key={h} value={h}>{h}:00</option>)}
               </select>
