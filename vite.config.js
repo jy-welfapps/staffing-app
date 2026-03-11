@@ -1,7 +1,9 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+  // ★ ここを自分のGitHubリポジトリ名に変更してください
+  // 例: リポジトリが https://github.com/yourname/childcare なら '/childcare/'
+  base: '/staffing-app/',
 })
