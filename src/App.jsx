@@ -764,24 +764,32 @@ function ChildCol({ person, colW, onUpdate, onDelete, onAdd, onPickupChange, hov
     if (e.target !== svgRef.current && e.target.tagName !== "line") return;
     e.preventDefault();
     if(e.altKey){
-      // Alt+クリック: お迎え時刻ピン設定
       onPickupChange(getT(e.clientY));
       return;
     }
+    const isTransfer = e.shiftKey;
     const t0 = getT(e.clientY); let moved = false;
-    setGhost({start:t0, end:Math.min(t0+1,H_END)});
-    const mm = ev => { moved=true; const t1=getT(ev.clientY); setGhost({start:Math.min(t0,t1),end:Math.max(t0,t1)}); };
+    setGhost({start:t0, end:Math.min(t0+1,H_END), isTransfer});
+    const mm = ev => { moved=true; const t1=getT(ev.clientY); setGhost({start:Math.min(t0,t1),end:Math.max(t0,t1),isTransfer}); };
     const mu = ev => {
       window.removeEventListener("mousemove",mm); window.removeEventListener("mouseup",mu);
       setGhost(null);
       if (!moved) {
         const end=Math.min(t0+1,H_END);
-        if(!person.segments.some(s=>t0<s.end&&end>s.start)) onAdd(mkSeg(t0,end,"work"));
+        if(isTransfer){
+          onAdd(mkSeg(t0,end,"transfer",1));
+        } else {
+          if(!person.segments.some(s=>s.type==="work"&&t0<s.end&&end>s.start)) onAdd(mkSeg(t0,end,"work"));
+        }
         return;
       }
       const t1=getT(ev.clientY), start=sv(Math.min(t0,t1)), end=sv(Math.max(t0,t1));
       if(end-start<MIN_DUR)return;
-      if(!person.segments.some(s=>start<s.end&&end>s.start)) onAdd(mkSeg(start,end,"work"));
+      if(isTransfer){
+        onAdd(mkSeg(start,end,"transfer",1));
+      } else {
+        if(!person.segments.some(s=>s.type==="work"&&start<s.end&&end>s.start)) onAdd(mkSeg(start,end,"work"));
+      }
     };
     window.addEventListener("mousemove",mm); window.addEventListener("mouseup",mu);
   };
@@ -836,7 +844,29 @@ function ChildCol({ person, colW, onUpdate, onDelete, onAdd, onPickupChange, hov
       {hoverT!=null&&<line x1={0} y1={tY(hoverT)} x2={colW} y2={tY(hoverT)} stroke="#fbbf24" strokeWidth={1} opacity={0.3}/>}
 
       
-      {person.segments.map(seg=>{
+      {/* 送迎バー */}
+      {person.segments.filter(s=>s.type==="transfer").map(seg=>{
+        const y=tY(seg.start), h=Math.max((seg.end-seg.start)*CH-2,4);
+        const num=seg.num||1; const col=rc(num);
+        return (
+          <g key={seg.id}>
+            <rect x={BX} y={y+1} width={BW} height={h} rx={3} fill={"url(#tr"+num+")"} opacity={0.88}
+              style={ST34}
+              onMouseDown={e=>startSegDrag(e,seg,"move")}/>
+            <rect x={BX} y={y+1} width={BW} height={h} rx={3} fill="none" stroke={col} strokeWidth={2} opacity={0.9} style={{pointerEvents:"none"}}/>
+            <text x={BX+BW/2} y={y+h/2} textAnchor="middle" fontSize={10} fontWeight="900" fill="white" style={{pointerEvents:"none"}}>送{ROUTE_NUMS[num-1]}</text>
+            {h>28&&<text x={BX+BW/2} y={y+h/2+13} textAnchor="middle" fontSize={9.5} fontWeight="700" fill="rgba(255,255,255,0.93)" style={{pointerEvents:"none"}}>{toHM(seg.start)}〜{toHM(seg.end)}</text>}
+            <rect x={BX} y={y+1} width={BW} height={16} rx={3} fill="rgba(255,255,255,0.15)" style={{cursor:"ns-resize"}} onMouseDown={e=>{e.stopPropagation();startSegDrag(e,seg,"top");}}/>
+            <rect x={BX} y={y+h-15} width={BW} height={16} rx={3} fill="rgba(255,255,255,0.15)" style={{cursor:"ns-resize"}} onMouseDown={e=>{e.stopPropagation();startSegDrag(e,seg,"bottom");}}/>
+            <g onMouseDown={e=>e.stopPropagation()} onClick={e=>{e.stopPropagation();onDelete(seg.id);}}>
+              <circle cx={BX+BW-5} cy={y+8} r={6} fill="#0a0f1a" opacity={0.85}/>
+              <text x={BX+BW-5} y={y+12} textAnchor="middle" fontSize={9} fill="#64748b" style={{pointerEvents:"none"}}>×</text>
+            </g>
+          </g>
+        );
+      })}
+      {/* 在所バー */}
+      {person.segments.filter(s=>s.type==="work").map(seg=>{
         const y=tY(seg.start), h=Math.max((seg.end-seg.start)*CH-2,4);
         return (
           <g key={seg.id}>
@@ -902,10 +932,11 @@ function ChildCol({ person, colW, onUpdate, onDelete, onAdd, onPickupChange, hov
       
       {ghost&&(()=>{
         const gy=tY(ghost.start), gh=Math.max((ghost.end-ghost.start)*CH-2,4);
+        const gc=ghost.isTransfer?rc(1):color;
         return (
           <g style={ST43}>
-            <rect x={BX} y={gy+1} width={BW} height={gh} rx={3} fill={color} opacity={0.25}/>
-            <rect x={BX} y={gy+1} width={BW} height={gh} rx={3} fill="none" stroke={color} strokeWidth={1.5} strokeDasharray="4,2" opacity={0.8}/>
+            <rect x={BX} y={gy+1} width={BW} height={gh} rx={3} fill={gc} opacity={0.25}/>
+            <rect x={BX} y={gy+1} width={BW} height={gh} rx={3} fill="none" stroke={gc} strokeWidth={1.5} strokeDasharray="4,2" opacity={0.8}/>
           </g>
         );
       })()}
@@ -1668,16 +1699,29 @@ function AppInner() {
   // セグメント操作
   const updSeg=(pid,seg,isSt)=>{
     let list=isSt?[...staff]:[...children];
-    if(isSt && seg.type==="transfer"){
+    if(seg.type==="transfer"){
       const routeNum=seg.num||1;
-      list=list.map(p=>{
-        if(p.id===pid) return {...p,segments:p.segments.map(s=>s.id===seg.id?seg:s)};
+      // 職員・児童両方の同ルートを連動
+      const staffList = [...staff].map(p=>{
+        if(!isSt && p.id===pid) return p; // 児童のpidが職員に一致するはずはないが念のため
+        if(isSt && p.id===pid) return {...p,segments:p.segments.map(s=>s.id===seg.id?seg:s)};
         const hasSame=p.segments.some(s=>s.type==="transfer"&&(s.num||1)===routeNum);
         if(!hasSame) return p;
         return {...p,segments:p.segments.map(s=>
           (s.type==="transfer"&&(s.num||1)===routeNum)?{...s,start:seg.start,end:seg.end}:s
         )};
       });
+      const childList = [...children].map(p=>{
+        if(isSt && p.id===pid) return p;
+        if(!isSt && p.id===pid) return {...p,segments:p.segments.map(s=>s.id===seg.id?seg:s)};
+        const hasSame=p.segments.some(s=>s.type==="transfer"&&(s.num||1)===routeNum);
+        if(!hasSame) return p;
+        return {...p,segments:p.segments.map(s=>
+          (s.type==="transfer"&&(s.num||1)===routeNum)?{...s,start:seg.start,end:seg.end}:s
+        )};
+      });
+      persistData({...data,staff:staffList,children:childList});
+      return;
     } else {
       const i=list.findIndex(p=>p.id===pid);
       list[i]={...list[i],segments:list[i].segments.map(s=>s.id===seg.id?seg:s)};
