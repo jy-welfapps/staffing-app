@@ -1,11 +1,45 @@
 // ============================================================
-//  児童・職員スケジュール管理 v8.0.10
+//  児童・職員スケジュール管理 v8.0.12
 //  縦軸 = 時間(8:00〜19:00)、横軸 = 人員
 //  職員: 在所(下地)+送迎(斜線オーバーレイ, ルート番号)+休憩(ドット)
 //  児童: 在所バー+お迎えピン📌、学校グループ別列
 //  ルートオーバーレイ: 同一ルート番号の職員列を横断する帯
 // ============================================================
 import { useState, useEffect, useRef, useMemo, useCallback, createContext, useContext } from "react";
+
+// ─── タッチ操作ユーティリティ ─────────────────────────────────
+// タッチとマウスを統一して扱うヘルパー
+const getClientY = e => e.touches ? e.touches[0].clientY : e.clientY;
+const getClientX = e => e.touches ? e.touches[0].clientX : e.clientX;
+
+// セグメント操作コンテキストメニュー
+function SegMenu({ x, y, items, onClose }) {
+  useEffect(() => {
+    const close = () => onClose();
+    setTimeout(() => window.addEventListener("touchstart", close), 0);
+    setTimeout(() => window.addEventListener("mousedown", close), 0);
+    return () => { window.removeEventListener("touchstart", close); window.removeEventListener("mousedown", close); };
+  }, []);
+  return (
+    <div onMouseDown={e=>e.stopPropagation()} onTouchStart={e=>e.stopPropagation()}
+      style={{position:"fixed",left:Math.min(x,window.innerWidth-160),top:Math.min(y,window.innerHeight-200),
+        zIndex:500,background:"#0f172a",border:"1px solid #334155",borderRadius:10,
+        boxShadow:"0 8px 32px rgba(0,0,0,0.7)",overflow:"hidden",minWidth:150}}>
+      {items.map((item,i)=>(
+        <div key={i} onMouseDown={e=>{e.stopPropagation();item.action();onClose();}}
+          onTouchStart={e=>{e.stopPropagation();e.preventDefault();item.action();onClose();}}
+          style={{padding:"11px 16px",fontSize:13,color:item.danger?"#ef4444":"#e2e8f0",
+            borderBottom:i<items.length-1?"1px solid #1e293b":"none",cursor:"pointer",
+            background:"transparent"}}
+          onMouseEnter={e=>e.currentTarget.style.background="#1e293b"}
+          onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+          {item.label}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 
 // ─── 定数 ────────────────────────────────────────────────────
 const H_START_DEF = 7, H_END_DEF = 20;
@@ -335,9 +369,10 @@ function StaffCol({ person, colW, onUpdate, onDelete, onAdd, hoverT }) {
   const {hStart:H_START,hEnd:H_END,hTotal:H_TOTAL,ch:CH,totalH:TOTAL_H} = useG();
   const tY = t => (t - H_START) * CH;
   const color = (STAFF_TYPES[person.stype]&&STAFF_TYPES[person.stype].color) || "#3b82f6";
-  const BX = 4, BW = colW - 8; // バーのx・幅
+  const BX = 4, BW = colW - 8;
   const dragRef = useRef(null);
   const [ghost, setGhost] = useState(null);
+  const [menu, setMenu] = useState(null); // {x,y,items}
   const svgRef = useRef(null);
 
   const getT = useCallback(clientY => {
@@ -346,16 +381,17 @@ function StaffCol({ person, colW, onUpdate, onDelete, onAdd, hoverT }) {
     return Yt(clientY - rect.top);
   }, []);
 
-  // 既存セグメントのドラッグ（clientYを直接受け取る）
+  // タッチ・マウス共通ドラッグ
   const startSegDrag = (e, seg, mode, overrideY) => {
     e.stopPropagation(); e.preventDefault();
-    const startClientY = overrideY || e.clientY;
+    const isTouch = !!e.touches;
+    const startClientY = overrideY || getClientY(e);
     const t0 = getT(startClientY);
     dragRef.current = { mode, t0, s0: seg.start, e0: seg.end, seg };
     const dur = seg.end - seg.start;
     const mm = ev => {
       if (!dragRef.current) return;
-      const dt = getT(ev.clientY) - dragRef.current.t0;
+      const dt = getT(getClientY(ev)) - dragRef.current.t0;
       const { mode, s0, e0, seg } = dragRef.current;
       if (mode === "move") {
         const ns = sv(clamp(s0+dt, H_START, H_END-dur));
@@ -368,28 +404,35 @@ function StaffCol({ person, colW, onUpdate, onDelete, onAdd, hoverT }) {
         onUpdate({...seg, end:ne});
       }
     };
-    const mu = () => { dragRef.current=null; window.removeEventListener("mousemove",mm); window.removeEventListener("mouseup",mu); };
-    window.addEventListener("mousemove",mm); window.addEventListener("mouseup",mu);
+    const mu = () => {
+      dragRef.current=null;
+      if(isTouch){ window.removeEventListener("touchmove",mm); window.removeEventListener("touchend",mu); }
+      else { window.removeEventListener("mousemove",mm); window.removeEventListener("mouseup",mu); }
+    };
+    if(isTouch){ window.addEventListener("touchmove",mm,{passive:false}); window.addEventListener("touchend",mu); }
+    else { window.addEventListener("mousemove",mm); window.addEventListener("mouseup",mu); }
   };
 
-  // 空白ドラッグで新セグ追加（Ctrl/Shift/Alt押下時はバー上からも呼ばれる）
+  // 空白ドラッグで新セグ追加（タッチ対応）
   const handleSvgDown = e => {
-    const isTransfer = e.shiftKey, isBreak = e.ctrlKey || e.metaKey;
+    const isTouch = !!e.touches;
+    const isTransfer = e.shiftKey, isBreak = e.altKey;
     const onBackground = e.target === svgRef.current || e.target.tagName === "line";
     if (!onBackground && !isTransfer && !isBreak) return;
-    if (!isTransfer && !isBreak && !onBackground) return;
     const segType = isTransfer ? "transfer" : isBreak ? "break" : "work";
-    const t0 = getT(e.clientY);
+    const t0 = getT(getClientY(e));
     let moved = false;
     setGhost({ start:t0, end:Math.min(t0+1,H_END), segType });
 
     const mm = ev => {
       moved = true;
-      const t1 = getT(ev.clientY);
+      if(isTouch) ev.preventDefault();
+      const t1 = getT(getClientY(ev));
       setGhost({ start:Math.min(t0,t1), end:Math.max(t0,t1), segType });
     };
     const mu = ev => {
-      window.removeEventListener("mousemove",mm); window.removeEventListener("mouseup",mu);
+      if(isTouch){ window.removeEventListener("touchmove",mm); window.removeEventListener("touchend",mu); }
+      else { window.removeEventListener("mousemove",mm); window.removeEventListener("mouseup",mu); }
       if (!moved) {
         setGhost(null);
         if (!isTransfer && !isBreak) {
@@ -397,22 +440,57 @@ function StaffCol({ person, colW, onUpdate, onDelete, onAdd, hoverT }) {
           if (!person.segments.some(s=>s.type==="work"&&t0<s.end&&end>s.start))
             onAdd(mkSeg(t0, end, "work"));
         } else if (isBreak) {
-          // Ctrl+クリック → クリック位置を起点に1時間の休憩を即追加
           const end = Math.min(t0+1, H_END);
           onAdd(mkSeg(t0, end, "break", 1));
+        } else if (isTransfer) {
+          const end = Math.min(t0+1, H_END);
+          onAdd(mkSeg(t0, end, "transfer", 1));
         }
-        // Shift+クリック（送迎）はドラッグで範囲指定を促す
         return;
       }
       setGhost(null);
-      const t1 = getT(ev.clientY);
+      const t1 = getT(getClientY(ev));
       const start = sv(Math.min(t0,t1)), end = sv(Math.max(t0,t1));
       if (end - start < MIN_DUR) return;
-      // work同士のみ重複禁止。送迎・休憩は在所の上に重ねてOK
       if (!isTransfer && !isBreak && person.segments.some(s=>s.type==="work"&&start<s.end&&end>s.start)) return;
       onAdd(mkSeg(start, end, segType, isTransfer||isBreak?1:null));
     };
-    window.addEventListener("mousemove",mm); window.addEventListener("mouseup",mu);
+    if(isTouch){ window.addEventListener("touchmove",mm,{passive:false}); window.addEventListener("touchend",mu); }
+    else { window.addEventListener("mousemove",mm); window.addEventListener("mouseup",mu); }
+  };
+
+  // タッチタップで空白部分にメニュー表示
+  const handleSvgTap = e => {
+    const onBackground = e.target === svgRef.current || e.target.tagName === "line";
+    if(!onBackground) return;
+    const t0 = getT(getClientY(e));
+    const cx = getClientX(e), cy = getClientY(e);
+    e.preventDefault();
+    setMenu({ x:cx, y:cy, items:[
+      { label:"✅ 在所追加(1h)", action:()=>{
+        const end=Math.min(t0+1,H_END);
+        if(!person.segments.some(s=>s.type==="work"&&t0<s.end&&end>s.start))
+          onAdd(mkSeg(t0,end,"work"));
+      }},
+      { label:"🚌 送迎追加(1h)", action:()=>onAdd(mkSeg(t0,Math.min(t0+1,H_END),"transfer",1))},
+      { label:"☕ 休憩追加(1h)", action:()=>onAdd(mkSeg(t0,Math.min(t0+1,H_END),"break",1))},
+    ]});
+  };
+
+  // バータップでメニュー表示（タッチのみ）
+  const handleSegTap = (e, seg) => {
+    e.stopPropagation(); e.preventDefault();
+    const cx = getClientX(e), cy = getClientY(e);
+    const items = [
+      { label:"🗑 削除", action:()=>onDelete(seg.id), danger:true },
+    ];
+    if(seg.type==="transfer"){
+      items.unshift({ label:`🚌 ルート変更 → ${ROUTE_NUMS[((seg.num||1))%8]}`, action:()=>onUpdate({...seg,num:((seg.num||1)%8)+1})});
+    }
+    if(seg.type==="break"){
+      items.unshift({ label:`☕ 休憩番号変更 → ${BREAK_NUMS[((seg.num||1))%2]}`, action:()=>onUpdate({...seg,num:((seg.num||1)%2)+1})});
+    }
+    setMenu({ x:cx, y:cy, items });
   };
 
   const works    = person.segments.filter(s=>s.type==="work");
@@ -427,9 +505,26 @@ function StaffCol({ person, colW, onUpdate, onDelete, onAdd, hoverT }) {
 
   return (
     <div style={{position:"relative",width:colW,flexShrink:0}}>
+    {menu&&<SegMenu x={menu.x} y={menu.y} items={menu.items} onClose={()=>setMenu(null)}/>}
     <svg ref={svgRef} width={colW} height={TOTAL_H}
       style={ST8}
-      onMouseDown={handleSvgDown}>
+      onMouseDown={handleSvgDown}
+      onTouchStart={e=>{
+        const onBg=e.target===svgRef.current||e.target.tagName==="line";
+        if(!onBg) return;
+        const t=e.timeStamp;
+        const tid=e.touches[0].identifier;
+        let moved=false;
+        const tmove=ev=>{if(ev.touches[0].identifier===tid&&Math.abs(getClientY(ev)-getClientY(e))>8)moved=true;};
+        const tend=ev=>{
+          window.removeEventListener("touchmove",tmove);
+          window.removeEventListener("touchend",tend);
+          if(!moved) handleSvgTap(e);
+          else handleSvgDown(e);
+        };
+        window.addEventListener("touchmove",tmove,{passive:true});
+        window.addEventListener("touchend",tend);
+      }}>
       
       {Array.from({length:H_TOTAL+1},(_,i)=>(
         <line key={i} x1={0} y1={i*CH} x2={colW} y2={i*CH} stroke="#1e293b" strokeWidth={i%2===0?1:0.4}/>
@@ -450,15 +545,27 @@ function StaffCol({ person, colW, onUpdate, onDelete, onAdd, hoverT }) {
             <rect x={BX} y={y+1} width={BW} height={h} rx={4} fill={color} opacity={0.82}
               style={ST9}
               onMouseDown={e=>{
-                if(e.shiftKey||e.ctrlKey||e.metaKey){ handleSvgDown(e); return; }
+                if(e.shiftKey||e.altKey){ handleSvgDown(e); return; }
                 startSegDrag(e,seg,"move");
+              }}
+              onTouchStart={e=>{
+                e.stopPropagation();
+                let moved=false;
+                const tmove=ev=>{if(Math.abs(getClientY(ev)-getClientY(e))>8){moved=true;startSegDrag(e,seg,"move",getClientY(ev));}};
+                const tend=ev=>{window.removeEventListener("touchmove",tmove);window.removeEventListener("touchend",tend);if(!moved)handleSegTap(e,seg);};
+                window.addEventListener("touchmove",tmove,{passive:false});
+                window.addEventListener("touchend",tend);
               }}/>
             
-            <rect x={BX} y={y+1} width={BW} height={7} rx={3} fill="rgba(255,255,255,0.2)"
-              style={ST10} onMouseDown={e=>startSegDrag(e,seg,"top")}/>
+            <rect x={BX} y={y+1} width={BW} height={14} rx={3} fill="rgba(255,255,255,0.2)"
+              style={ST10}
+              onMouseDown={e=>startSegDrag(e,seg,"top")}
+              onTouchStart={e=>{e.stopPropagation();startSegDrag(e,seg,"top");}}/>
             
-            <rect x={BX} y={y+h-6} width={BW} height={7} rx={3} fill="rgba(255,255,255,0.2)"
-              style={ST11} onMouseDown={e=>startSegDrag(e,seg,"bottom")}/>
+            <rect x={BX} y={y+h-13} width={BW} height={14} rx={3} fill="rgba(255,255,255,0.2)"
+              style={ST11}
+              onMouseDown={e=>startSegDrag(e,seg,"bottom")}
+              onTouchStart={e=>{e.stopPropagation();startSegDrag(e,seg,"bottom");}}/>
             
             <g style={ST12} onMouseDown={e=>e.stopPropagation()} onClick={()=>onDelete(seg.id)}>
               <circle cx={BX+BW-5} cy={y+8} r={6} fill="#0a0f1a" opacity={0.85}/>
@@ -491,34 +598,32 @@ function StaffCol({ person, colW, onUpdate, onDelete, onAdd, hoverT }) {
         return (
           <g key={seg.id}>
             
-            <rect x={BX} y={y+1} width={BW} height={8} rx={3} fill="rgba(255,255,255,0.15)"
+            <rect x={BX} y={y+1} width={BW} height={16} rx={3} fill="rgba(255,255,255,0.15)"
               style={ST16}
-              onMouseDown={e=>{e.stopPropagation();startSegDrag(e,seg,"top");}}/>
+              onMouseDown={e=>{e.stopPropagation();startSegDrag(e,seg,"top");}}
+              onTouchStart={e=>{e.stopPropagation();startSegDrag(e,seg,"top");}}/>
             
-            <rect x={BX} y={y+h-7} width={BW} height={8} rx={3} fill="rgba(255,255,255,0.15)"
+            <rect x={BX} y={y+h-15} width={BW} height={16} rx={3} fill="rgba(255,255,255,0.15)"
               style={ST17}
-              onMouseDown={e=>{e.stopPropagation();startSegDrag(e,seg,"bottom");}}/>
+              onMouseDown={e=>{e.stopPropagation();startSegDrag(e,seg,"bottom");}}
+              onTouchStart={e=>{e.stopPropagation();startSegDrag(e,seg,"bottom");}}/>
             
-            <rect x={BX} y={y+9} width={BW} height={Math.max(h-16,2)} rx={2}
+            <rect x={BX} y={y+17} width={BW} height={Math.max(h-32,2)} rx={2}
               fill="transparent" style={ST18}
               onMouseDown={e=>{
                 e.stopPropagation();
                 const startY=e.clientY;
                 let dragging=false;
-                const mmCheck=ev=>{
-                  if(!dragging&&Math.abs(ev.clientY-startY)>4){
-                    dragging=true;
-                    window.removeEventListener("mousemove",mmCheck);
-                    startSegDrag(e,seg,"move",ev.clientY);
-                  }
-                };
-                const muCheck=ev=>{
-                  window.removeEventListener("mousemove",mmCheck);
-                  window.removeEventListener("mouseup",muCheck);
-                  if(!dragging) onUpdate({...seg,num:(num%8)+1});
-                };
-                window.addEventListener("mousemove",mmCheck);
-                window.addEventListener("mouseup",muCheck);
+                const mmCheck=ev=>{if(!dragging&&Math.abs(ev.clientY-startY)>4){dragging=true;window.removeEventListener("mousemove",mmCheck);startSegDrag(e,seg,"move",ev.clientY);}};
+                const muCheck=ev=>{window.removeEventListener("mousemove",mmCheck);window.removeEventListener("mouseup",muCheck);if(!dragging)onUpdate({...seg,num:(num%8)+1});};
+                window.addEventListener("mousemove",mmCheck);window.addEventListener("mouseup",muCheck);
+              }}
+              onTouchStart={e=>{
+                e.stopPropagation();
+                let moved=false;
+                const tmove=ev=>{if(Math.abs(getClientY(ev)-getClientY(e))>8){moved=true;startSegDrag(e,seg,"move",getClientY(ev));}};
+                const tend=ev=>{window.removeEventListener("touchmove",tmove);window.removeEventListener("touchend",tend);if(!moved)handleSegTap(e,seg);};
+                window.addEventListener("touchmove",tmove,{passive:false});window.addEventListener("touchend",tend);
               }}/>
             
             <rect x={BX} y={y+1} width={BW} height={h} rx={4} fill={"url(#tr"+num+")"} opacity={0.88} style={ST19}/>
@@ -546,34 +651,32 @@ function StaffCol({ person, colW, onUpdate, onDelete, onAdd, hoverT }) {
         return (
           <g key={seg.id}>
             
-            <rect x={BX} y={y+1} width={BW} height={8} rx={3} fill="rgba(255,255,255,0.15)"
+            <rect x={BX} y={y+1} width={BW} height={16} rx={3} fill="rgba(255,255,255,0.15)"
               style={ST24}
-              onMouseDown={e=>{e.stopPropagation();startSegDrag(e,seg,"top");}}/>
+              onMouseDown={e=>{e.stopPropagation();startSegDrag(e,seg,"top");}}
+              onTouchStart={e=>{e.stopPropagation();startSegDrag(e,seg,"top");}}/>
             
-            <rect x={BX} y={y+h-7} width={BW} height={8} rx={3} fill="rgba(255,255,255,0.15)"
+            <rect x={BX} y={y+h-15} width={BW} height={16} rx={3} fill="rgba(255,255,255,0.15)"
               style={ST25}
-              onMouseDown={e=>{e.stopPropagation();startSegDrag(e,seg,"bottom");}}/>
+              onMouseDown={e=>{e.stopPropagation();startSegDrag(e,seg,"bottom");}}
+              onTouchStart={e=>{e.stopPropagation();startSegDrag(e,seg,"bottom");}}/>
             
-            <rect x={BX} y={y+9} width={BW} height={Math.max(h-16,2)} rx={2}
+            <rect x={BX} y={y+17} width={BW} height={Math.max(h-32,2)} rx={2}
               fill="transparent" style={ST26}
               onMouseDown={e=>{
                 e.stopPropagation();
                 const startY=e.clientY;
                 let dragging=false;
-                const mmCheck=ev=>{
-                  if(!dragging&&Math.abs(ev.clientY-startY)>4){
-                    dragging=true;
-                    window.removeEventListener("mousemove",mmCheck);
-                    startSegDrag(e,seg,"move",ev.clientY);
-                  }
-                };
-                const muCheck=ev=>{
-                  window.removeEventListener("mousemove",mmCheck);
-                  window.removeEventListener("mouseup",muCheck);
-                  if(!dragging) onUpdate({...seg,num:(num%2)+1});
-                };
-                window.addEventListener("mousemove",mmCheck);
-                window.addEventListener("mouseup",muCheck);
+                const mmCheck=ev=>{if(!dragging&&Math.abs(ev.clientY-startY)>4){dragging=true;window.removeEventListener("mousemove",mmCheck);startSegDrag(e,seg,"move",ev.clientY);}};
+                const muCheck=ev=>{window.removeEventListener("mousemove",mmCheck);window.removeEventListener("mouseup",muCheck);if(!dragging)onUpdate({...seg,num:(num%2)+1});};
+                window.addEventListener("mousemove",mmCheck);window.addEventListener("mouseup",muCheck);
+              }}
+              onTouchStart={e=>{
+                e.stopPropagation();
+                let moved=false;
+                const tmove=ev=>{if(Math.abs(getClientY(ev)-getClientY(e))>8){moved=true;startSegDrag(e,seg,"move",getClientY(ev));}};
+                const tend=ev=>{window.removeEventListener("touchmove",tmove);window.removeEventListener("touchend",tend);if(!moved)handleSegTap(e,seg);};
+                window.addEventListener("touchmove",tmove,{passive:false});window.addEventListener("touchend",tend);
               }}/>
             
             <rect x={BX} y={y+1} width={BW} height={h} rx={4} fill={"url(#br"+num+")"} opacity={0.92} style={ST27}/>
@@ -625,6 +728,7 @@ function StaffCol({ person, colW, onUpdate, onDelete, onAdd, hoverT }) {
 function ChildCol({ person, colW, onUpdate, onDelete, onAdd, onPickupChange, hoverT, schoolGroups: SG }) {
   const {hStart:H_START,hEnd:H_END,hTotal:H_TOTAL,ch:CH,totalH:TOTAL_H} = useG();
   const tY = t => (t - H_START) * CH;
+  const [menu, setMenu] = useState(null);
   const SG2 = SG || SCHOOL_GROUPS;
   const color = (SG2[person.school]&&SG2[person.school].color) || "#64748b";
   const BX = 3, BW = colW - 6;
@@ -650,8 +754,10 @@ function ChildCol({ person, colW, onUpdate, onDelete, onAdd, onPickupChange, hov
       else if (mode==="top") { onUpdate({...seg,start:sv(clamp(s0+dt,H_START,e0-MIN_DUR))}); }
       else { onUpdate({...seg,end:sv(clamp(e0+dt,s0+MIN_DUR,H_END))}); }
     };
-    const mu = () => { dragRef.current=null; window.removeEventListener("mousemove",mm); window.removeEventListener("mouseup",mu); };
-    window.addEventListener("mousemove",mm); window.addEventListener("mouseup",mu);
+    const isTouch2 = !!e.touches;
+    const mu = () => { dragRef.current=null; if(isTouch2){window.removeEventListener("touchmove",mm);window.removeEventListener("touchend",mu);}else{window.removeEventListener("mousemove",mm);window.removeEventListener("mouseup",mu);} };
+    if(isTouch2){window.addEventListener("touchmove",mm,{passive:false});window.addEventListener("touchend",mu);}
+    else{window.addEventListener("mousemove",mm);window.addEventListener("mouseup",mu);}
   };
 
   const handleSvgDown = e => {
@@ -698,9 +804,31 @@ function ChildCol({ person, colW, onUpdate, onDelete, onAdd, onPickupChange, hov
 
   return (
     <div style={{position:"relative",width:colW,flexShrink:0}}>
+    {menu&&<SegMenu x={menu.x} y={menu.y} items={menu.items} onClose={()=>setMenu(null)}/>}
     <svg ref={svgRef} width={colW} height={TOTAL_H}
       style={ST33}
-      onMouseDown={handleSvgDown}>
+      onMouseDown={handleSvgDown}
+      onTouchStart={e=>{
+        const onBg=e.target===svgRef.current||e.target.tagName==="line";
+        if(!onBg) return;
+        let moved=false;
+        const tmove=ev=>{if(Math.abs(getClientY(ev)-getClientY(e))>8)moved=true;};
+        const tend=ev=>{
+          window.removeEventListener("touchmove",tmove);
+          window.removeEventListener("touchend",tend);
+          if(!moved){
+            const t0=getT(getClientY(e));
+            const cx=getClientX(e),cy=getClientY(e);
+            e.preventDefault();
+            setMenu({x:cx,y:cy,items:[
+              {label:"✅ 在所追加(1h)",action:()=>{const end=Math.min(t0+1,H_END);if(!person.segments.some(s=>s.type==="work"&&t0<s.end&&end>s.start))onAdd(mkSeg(t0,end,"work"));}},
+              {label:"📌 お迎えピン設定",action:()=>onPickupChange(t0)},
+            ]});
+          }
+        };
+        window.addEventListener("touchmove",tmove,{passive:true});
+        window.addEventListener("touchend",tend);
+      }}>
       {Array.from({length:H_TOTAL+1},(_,i)=>(
         <line key={i} x1={0} y1={i*CH} x2={colW} y2={i*CH} stroke="#1e293b" strokeWidth={i%2===0?0.8:0.3}/>
       ))}
@@ -713,11 +841,25 @@ function ChildCol({ person, colW, onUpdate, onDelete, onAdd, onPickupChange, hov
         return (
           <g key={seg.id}>
             <rect x={BX} y={y+1} width={BW} height={h} rx={3} fill={color} opacity={0.75}
-              style={ST34} onMouseDown={e=>startSegDrag(e,seg,"move")}/>
-            <rect x={BX} y={y+1} width={BW} height={6} rx={2} fill="rgba(255,255,255,0.18)"
-              style={ST35} onMouseDown={e=>startSegDrag(e,seg,"top")}/>
-            <rect x={BX} y={y+h-5} width={BW} height={6} rx={2} fill="rgba(255,255,255,0.18)"
-              style={ST36} onMouseDown={e=>startSegDrag(e,seg,"bottom")}/>
+              style={ST34}
+              onMouseDown={e=>startSegDrag(e,seg,"move")}
+              onTouchStart={e=>{
+                e.stopPropagation();
+                let moved=false;
+                const tmove=ev=>{if(Math.abs(getClientY(ev)-getClientY(e))>8){moved=true;startSegDrag(e,seg,"move",getClientY(ev));}};
+                const tend=ev=>{window.removeEventListener("touchmove",tmove);window.removeEventListener("touchend",tend);
+                  if(!moved) setMenu({x:getClientX(e),y:getClientY(e),items:[{label:"🗑 削除",action:()=>onDelete(seg.id),danger:true}]});
+                };
+                window.addEventListener("touchmove",tmove,{passive:false});window.addEventListener("touchend",tend);
+              }}/>
+            <rect x={BX} y={y+1} width={BW} height={14} rx={2} fill="rgba(255,255,255,0.18)"
+              style={ST35}
+              onMouseDown={e=>startSegDrag(e,seg,"top")}
+              onTouchStart={e=>{e.stopPropagation();startSegDrag(e,seg,"top");}}/>
+            <rect x={BX} y={y+h-13} width={BW} height={14} rx={2} fill="rgba(255,255,255,0.18)"
+              style={ST36}
+              onMouseDown={e=>startSegDrag(e,seg,"bottom")}
+              onTouchStart={e=>{e.stopPropagation();startSegDrag(e,seg,"bottom");}}/>
             <g onMouseDown={e=>e.stopPropagation()} onClick={()=>onDelete(seg.id)}>
               <circle cx={BX+BW-4} cy={y+7} r={5} fill="#0a0f1a" opacity={0.85}/>
               <text x={BX+BW-4} y={y+11} textAnchor="middle" fontSize={8} fill="#64748b" style={ST37}>×</text>
@@ -1524,7 +1666,24 @@ function AppInner() {
   const setToast = msg=>{setToastMsg(msg);if(toastTimer.current)clearTimeout(toastTimer.current);toastTimer.current=setTimeout(()=>setToastMsg(null),2600);};
 
   // セグメント操作
-  const updSeg=(pid,seg,isSt)=>{const list=isSt?[...staff]:[...children];const i=list.findIndex(p=>p.id===pid);list[i]={...list[i],segments:list[i].segments.map(s=>s.id===seg.id?seg:s)};persistData(isSt?{...data,staff:list}:{...data,children:list});};
+  const updSeg=(pid,seg,isSt)=>{
+    let list=isSt?[...staff]:[...children];
+    if(isSt && seg.type==="transfer"){
+      const routeNum=seg.num||1;
+      list=list.map(p=>{
+        if(p.id===pid) return {...p,segments:p.segments.map(s=>s.id===seg.id?seg:s)};
+        const hasSame=p.segments.some(s=>s.type==="transfer"&&(s.num||1)===routeNum);
+        if(!hasSame) return p;
+        return {...p,segments:p.segments.map(s=>
+          (s.type==="transfer"&&(s.num||1)===routeNum)?{...s,start:seg.start,end:seg.end}:s
+        )};
+      });
+    } else {
+      const i=list.findIndex(p=>p.id===pid);
+      list[i]={...list[i],segments:list[i].segments.map(s=>s.id===seg.id?seg:s)};
+    }
+    persistData(isSt?{...data,staff:list}:{...data,children:list});
+  };
   const delSeg=(pid,sid,isSt)=>{const list=isSt?[...staff]:[...children];const i=list.findIndex(p=>p.id===pid);list[i]={...list[i],segments:list[i].segments.filter(s=>s.id!==sid)};persistData(isSt?{...data,staff:list}:{...data,children:list});};
   const addSeg=(pid,seg,isSt)=>{const list=isSt?[...staff]:[...children];const i=list.findIndex(p=>p.id===pid);list[i]={...list[i],segments:[...list[i].segments,seg]};persistData(isSt?{...data,staff:list}:{...data,children:list});};
   const changePickup=(pid,t)=>{const list=[...children];const i=list.findIndex(p=>p.id===pid);list[i]={...list[i],pickupTime:t};persistData({...data,children:list});};
