@@ -1,5 +1,5 @@
 // ============================================================
-//  児童・職員スケジュール管理 v8.0.12
+//  児童・職員スケジュール管理 v8.0.13
 //  縦軸 = 時間(8:00〜19:00)、横軸 = 人員
 //  職員: 在所(下地)+送迎(斜線オーバーレイ, ルート番号)+休憩(ドット)
 //  児童: 在所バー+お迎えピン📌、学校グループ別列
@@ -374,6 +374,8 @@ function StaffCol({ person, colW, onUpdate, onDelete, onAdd, hoverT }) {
   const [ghost, setGhost] = useState(null);
   const [menu, setMenu] = useState(null); // {x,y,items}
   const svgRef = useRef(null);
+  const tapCountRef = useRef(0);
+  const tapTimerRef = useRef(null);
 
   const getT = useCallback(clientY => {
     const rect = svgRef.current&&svgRef.current.getBoundingClientRect();
@@ -464,17 +466,22 @@ function StaffCol({ person, colW, onUpdate, onDelete, onAdd, hoverT }) {
     const onBackground = e.target === svgRef.current || e.target.tagName === "line";
     if(!onBackground) return;
     const t0 = getT(getClientY(e));
-    const cx = getClientX(e), cy = getClientY(e);
     e.preventDefault();
-    setMenu({ x:cx, y:cy, items:[
-      { label:"✅ 在所追加(1h)", action:()=>{
-        const end=Math.min(t0+1,H_END);
+    tapCountRef.current += 1;
+    if(tapTimerRef.current) clearTimeout(tapTimerRef.current);
+    tapTimerRef.current = setTimeout(() => {
+      const count = tapCountRef.current;
+      tapCountRef.current = 0;
+      const end = Math.min(t0+1, H_END);
+      if(count === 1){
         if(!person.segments.some(s=>s.type==="work"&&t0<s.end&&end>s.start))
           onAdd(mkSeg(t0,end,"work"));
-      }},
-      { label:"🚌 送迎追加(1h)", action:()=>onAdd(mkSeg(t0,Math.min(t0+1,H_END),"transfer",1))},
-      { label:"☕ 休憩追加(1h)", action:()=>onAdd(mkSeg(t0,Math.min(t0+1,H_END),"break",1))},
-    ]});
+      } else if(count === 2){
+        onAdd(mkSeg(t0,end,"transfer",1));
+      } else if(count >= 3){
+        onAdd(mkSeg(t0,end,"break",1));
+      }
+    }, 300);
   };
 
   // バータップでメニュー表示（タッチのみ）
@@ -512,18 +519,19 @@ function StaffCol({ person, colW, onUpdate, onDelete, onAdd, hoverT }) {
       onTouchStart={e=>{
         const onBg=e.target===svgRef.current||e.target.tagName==="line";
         if(!onBg) return;
-        const t=e.timeStamp;
-        const tid=e.touches[0].identifier;
-        let moved=false;
-        const tmove=ev=>{if(ev.touches[0].identifier===tid&&Math.abs(getClientY(ev)-getClientY(e))>8)moved=true;};
-        const tend=ev=>{
-          window.removeEventListener("touchmove",tmove);
-          window.removeEventListener("touchend",tend);
-          if(!moved) handleSvgTap(e);
-          else handleSvgDown(e);
-        };
-        window.addEventListener("touchmove",tmove,{passive:true});
-        window.addEventListener("touchend",tend);
+        if(e.touches.length===1){
+          const tid=e.touches[0].identifier;
+          let moved=false;
+          const tmove=ev=>{if(ev.touches[0]&&ev.touches[0].identifier===tid&&Math.abs(getClientY(ev)-getClientY(e))>10)moved=true;};
+          const tend=ev=>{
+            window.removeEventListener("touchmove",tmove);
+            window.removeEventListener("touchend",tend);
+            if(!moved) handleSvgTap(e);
+            else handleSvgDown(e);
+          };
+          window.addEventListener("touchmove",tmove,{passive:true});
+          window.addEventListener("touchend",tend);
+        }
       }}>
       
       {Array.from({length:H_TOTAL+1},(_,i)=>(
@@ -620,6 +628,7 @@ function StaffCol({ person, colW, onUpdate, onDelete, onAdd, hoverT }) {
               }}
               onTouchStart={e=>{
                 e.stopPropagation();
+                if(e.touches.length>=2){ startPinchStretch(e,seg); return; }
                 let moved=false;
                 const tmove=ev=>{if(Math.abs(getClientY(ev)-getClientY(e))>8){moved=true;startSegDrag(e,seg,"move",getClientY(ev));}};
                 const tend=ev=>{window.removeEventListener("touchmove",tmove);window.removeEventListener("touchend",tend);if(!moved)handleSegTap(e,seg);};
@@ -673,6 +682,7 @@ function StaffCol({ person, colW, onUpdate, onDelete, onAdd, hoverT }) {
               }}
               onTouchStart={e=>{
                 e.stopPropagation();
+                if(e.touches.length>=2){ startPinchStretch(e,seg); return; }
                 let moved=false;
                 const tmove=ev=>{if(Math.abs(getClientY(ev)-getClientY(e))>8){moved=true;startSegDrag(e,seg,"move",getClientY(ev));}};
                 const tend=ev=>{window.removeEventListener("touchmove",tmove);window.removeEventListener("touchend",tend);if(!moved)handleSegTap(e,seg);};
@@ -735,12 +745,39 @@ function ChildCol({ person, colW, onUpdate, onDelete, onAdd, onPickupChange, hov
   const dragRef = useRef(null);
   const [ghost, setGhost] = useState(null);
   const svgRef = useRef(null);
+  const tapCountRef = useRef(0);
+  const tapTimerRef = useRef(null);
 
   const getT = useCallback(clientY => {
     const rect = svgRef.current&&svgRef.current.getBoundingClientRect();
     if (!rect) return H_START;
     return Yt(clientY - rect.top);
   }, []);
+
+  const startPinchStretch = (e, seg) => {
+    e.stopPropagation(); e.preventDefault();
+    if(e.touches.length < 2) return;
+    const t1=e.touches[0], t2=e.touches[1];
+    const midY0=(t1.clientY+t2.clientY)/2;
+    const dist0=Math.abs(t1.clientY-t2.clientY);
+    const s0=seg.start, e0=seg.end, dur=e0-s0, mid0=s0+dur/2;
+    const mm=ev=>{
+      if(ev.touches.length<2) return;
+      const a=ev.touches[0], b=ev.touches[1];
+      const dist=Math.abs(a.clientY-b.clientY);
+      const midY=(a.clientY+b.clientY)/2;
+      const scale=dist0>4?dist/dist0:1;
+      const newDur=Math.max(MIN_DUR,dur*scale);
+      const midShift=(midY-midY0)/CH;
+      const newMid=mid0+midShift;
+      const ns=sv(clamp(newMid-newDur/2,H_START,H_END-newDur));
+      const ne=sv(clamp(ns+newDur,ns+MIN_DUR,H_END));
+      onUpdate({...seg,start:ns,end:ne});
+    };
+    const mu=()=>{window.removeEventListener("touchmove",mm);window.removeEventListener("touchend",mu);};
+    window.addEventListener("touchmove",mm,{passive:false});
+    window.addEventListener("touchend",mu);
+  };
 
   const startSegDrag = (e, seg, mode) => {
     e.stopPropagation(); e.preventDefault();
@@ -875,6 +912,7 @@ function ChildCol({ person, colW, onUpdate, onDelete, onAdd, onPickupChange, hov
               onMouseDown={e=>startSegDrag(e,seg,"move")}
               onTouchStart={e=>{
                 e.stopPropagation();
+                if(e.touches.length>=2){ startPinchStretch(e,seg); return; }
                 let moved=false;
                 const tmove=ev=>{if(Math.abs(getClientY(ev)-getClientY(e))>8){moved=true;startSegDrag(e,seg,"move",getClientY(ev));}};
                 const tend=ev=>{window.removeEventListener("touchmove",tmove);window.removeEventListener("touchend",tend);
